@@ -93,12 +93,12 @@ const context = canvas.getContext('2d')!;
 const codedWidth = exports.getCodedWidth(decoder);
 const codedHeight = exports.getCodedHeight(decoder);
 const frameDataPtr = exports.getFrameDataPtr(decoder);
-const frameData = new Float32Array(memory.buffer, frameDataPtr, codedWidth * codedHeight);
+const frameData = new Int32Array(memory.buffer, frameDataPtr, codedWidth * codedHeight);
 
 // Each element in frameData contains a float from 0-1. Paint as grayscale image to canvas using putImageData
 const imageData = context.createImageData(codedWidth, codedHeight);
 for (let i = 0; i < frameData.length; i++) {
-	const value = Math.round(frameData[i]! * 255);
+	const value = Math.round(255 * frameData[i]! / 1023);
 	imageData.data[i * 4] = value;
 	imageData.data[i * 4 + 1] = value;
 	imageData.data[i * 4 + 2] = value;
