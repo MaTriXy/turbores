@@ -89,6 +89,10 @@ for (let i = 0; i < iters; i++) {
 
 const end = performance.now();
 
+setTimeout(() => {
+	alert((end - start) / iters);
+});
+
 const canvas = document.createElement('canvas');
 canvas.width = exports.getDisplayWidth(decoder);
 canvas.height = exports.getDisplayHeight(decoder);
@@ -119,9 +123,7 @@ const frame = new VideoFrame(frameData, {
 context.drawImage(frame, 0, 0);
 frame.close();
 
-setTimeout(() => {
-	alert((end - start) / iters);
-});
+
 
 // Each element in frameData contains a float from 0-1. Paint as grayscale image to canvas using putImageData
 //const imageData = context.createImageData(codedWidth, codedHeight);

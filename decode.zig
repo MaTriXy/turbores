@@ -22,6 +22,8 @@ pub fn printValues(arguments: anytype) void {
     }
 }
 
+// Overall reference: https://wiki.multimedia.cx/index.php/Apple_ProRes
+
 const scan_order = transpose_scan_values(.{
     0,  1,  8,  9,  2,  3,  10, 11,
     16, 17, 24, 25, 18, 19, 26, 27,
@@ -147,12 +149,12 @@ inline fn parseSliceHeader(slice_sizes: []u16, reader: *ByteReader, i: usize) Sl
 
 const DcState = struct {
     bit_reader: *BitReader,
-    slice_data: []i32,
+    slice_data: []f32,
     code: i32,
     sign: i32,
     prev_dc: i32,
 
-    inline fn init(bit_reader: *BitReader, slice_data: []i32) DcState {
+    inline fn init(bit_reader: *BitReader, slice_data: []f32) DcState {
         var s = DcState{
             .bit_reader = bit_reader,
             .slice_data = slice_data,
@@ -167,7 +169,7 @@ const DcState = struct {
         s.code = @intCast(first_code_result.value);
 
         const first_dc = (s.code >> 1) ^ -(s.code & 1);
-        s.slice_data[0] = first_dc;
+        s.slice_data[0] = @floatFromInt(first_dc);
         s.prev_dc = first_dc;
 
         const second_code_result = parseCode(
@@ -175,10 +177,10 @@ const DcState = struct {
             0x70,
         );
         s.code = @intCast(second_code_result.value);
-        s.sign = @intFromBool(s.code > 0) * -(s.code & 1); // else 0;
+        s.sign = @intFromBool(s.code > 0) * -(s.code & 1);
 
         const result = s.prev_dc + (((s.code + 1) >> 1) ^ s.sign) - s.sign;
-        s.slice_data[64] = result;
+        s.slice_data[64] = @floatFromInt(result);
         s.prev_dc = result;
 
         s.bit_reader.consume(@intCast(first_code_result.bits + second_code_result.bits));
@@ -192,10 +194,10 @@ const DcState = struct {
         const code_result_1 = parseCode(s.bit_reader.current, dc_code_params[@min(@as(usize, @intCast(s.code)), 6)]);
 
         s.code = @intCast(code_result_1.value);
-        s.sign = @intFromBool(s.code > 0) * (s.sign ^ -(s.code & 1)); // else 0
+        s.sign = @intFromBool(s.code > 0) * (s.sign ^ -(s.code & 1));
 
         const result_1 = s.prev_dc + (((s.code + 1) >> 1) ^ s.sign) - s.sign;
-        s.slice_data[64 * j] = result_1;
+        s.slice_data[64 * j] = @floatFromInt(result_1);
 
         const code_result_2 = parseCode(
             s.bit_reader.current << @as(u6, @intCast(code_result_1.bits)),
@@ -203,10 +205,10 @@ const DcState = struct {
         );
 
         s.code = @intCast(code_result_2.value);
-        s.sign = @intFromBool(s.code > 0) * (s.sign ^ -(s.code & 1)); // else 0
+        s.sign = @intFromBool(s.code > 0) * (s.sign ^ -(s.code & 1));
 
         const result_2 = result_1 + (((s.code + 1) >> 1) ^ s.sign) - s.sign;
-        s.slice_data[64 * j + 64] = result_2;
+        s.slice_data[64 * j + 64] = @floatFromInt(result_2);
         s.prev_dc = result_2;
 
         s.bit_reader.consume(@intCast(code_result_1.bits + code_result_2.bits));
@@ -215,7 +217,7 @@ const DcState = struct {
 
 const AcState = struct {
     bit_reader: *BitReader,
-    slice_data: []i32,
+    slice_data: []f32,
     pos: u32,
     log2_block_count: u5,
     block_mask: u32,
@@ -242,7 +244,8 @@ const AcState = struct {
         const thing = run_result.bits + level_result.bits + 1;
         const sign = -@as(i32, @intCast((s.bit_reader.current >> @as(u6, @intCast(64 - thing))) & 1));
         s.bit_reader.consume(@intCast(thing));
-        s.slice_data[((s.pos & s.block_mask) << 6) + scan_order[j]] = (s.level ^ sign) - sign;
+        s.slice_data[((s.pos & s.block_mask) << 6) + scan_order[j]] = @floatFromInt((s.level ^ sign) - sign);
+
         return true;
     }
 };
@@ -250,8 +253,8 @@ const AcState = struct {
 fn parseDcPair(
     bit_reader_1: *BitReader,
     bit_reader_2: *BitReader,
-    slice_1_data: []i32,
-    slice_2_data: []i32,
+    slice_1_data: []f32,
+    slice_2_data: []f32,
     num_blocks: u32,
 ) void {
     var dc_state_1 = DcState.init(bit_reader_1, slice_1_data);
@@ -267,8 +270,8 @@ fn parseDcPair(
 fn parseAcPair(
     bit_reader_1: *BitReader,
     bit_reader_2: *BitReader,
-    slice_1_data: []i32,
-    slice_2_data: []i32,
+    slice_1_data: []f32,
+    slice_2_data: []f32,
     num_blocks: u32,
 ) void {
     const log2_block_count: u5 = @intCast(std.math.log2_int(u32, num_blocks));
@@ -299,7 +302,7 @@ fn parseAcPair(
     while (active_2) active_2 = ac_state_2.step();
 }
 
-fn parseDcSingle(bit_reader: *BitReader, slice_data: []i32, num_blocks: u32) void {
+fn parseDcSingle(bit_reader: *BitReader, slice_data: []f32, num_blocks: u32) void {
     var dc_state = DcState.init(bit_reader, slice_data);
 
     var j: u32 = 2;
@@ -308,7 +311,7 @@ fn parseDcSingle(bit_reader: *BitReader, slice_data: []i32, num_blocks: u32) voi
     }
 }
 
-fn parseAcSingle(bit_reader: *BitReader, slice_data: []i32, num_blocks: u32) void {
+fn parseAcSingle(bit_reader: *BitReader, slice_data: []f32, num_blocks: u32) void {
     const log2_block_count: u5 = @intCast(std.math.log2_int(u32, num_blocks));
     const block_mask = num_blocks - 1;
 
@@ -325,7 +328,7 @@ fn parseAcSingle(bit_reader: *BitReader, slice_data: []i32, num_blocks: u32) voi
 
 fn reconstructSlice(
     decoder: *Decoder,
-    slice_data: []const i32,
+    slice_data: []const f32,
     frame_data: []u16,
     scaling_matrix_vec: @Vector(64, f32),
     slice_pos: SlicePos,
@@ -386,15 +389,6 @@ inline fn getSlicePos(index: usize, slices_per_row: usize, slice_width: u32, sli
         .x = @intCast(index_in_row * (slice_width << 4)),
         .y = @intCast(row_index * (slice_height << 4)),
     };
-}
-
-fn lessThanU16(context: void, a: u16, b: u16) bool {
-    _ = context;
-    return a < b;
-}
-
-fn ceilToMultiple(x: anytype, m: @TypeOf(x)) @TypeOf(x) {
-    return ((x + m - 1) / m) * m;
 }
 
 fn decodePacketInternal(decoder: *Decoder) !void {
@@ -467,7 +461,6 @@ fn decodePacketInternal(decoder: *Decoder) !void {
 
     const frame_data_size = decoder.coded_width * decoder.coded_height * 2;
     decoder.frame_data = try gpa.realloc(decoder.frame_data, frame_data_size);
-    //@memset(decoder.frame_data[decoder.coded_width * decoder.coded_height ..], 512);
 
     const pic_hdr_size = reader.takeInt(u8);
     const pic_data_size = reader.takeInt(u32);
@@ -495,7 +488,7 @@ fn decodePacketInternal(decoder: *Decoder) !void {
     const luma_slice_len = 64 * num_luma_blocks;
     const chroma_slice_len = 64 * num_chroma_blocks;
 
-    const slice_data = try arena.alloc(i32, 2 * luma_slice_len + 4 * chroma_slice_len);
+    const slice_data = try arena.alloc(f32, 2 * luma_slice_len + 4 * chroma_slice_len);
 
     printValues(.{ pic_hdr_size, pic_data_size, total_slices, slice_dimensions, slice_width, slice_height, slice_sizes });
 
@@ -667,11 +660,11 @@ fn decodePacketInternal(decoder: *Decoder) !void {
         reader.pos = slice_offsets[index];
         var header = parseSliceHeader(slice_sizes, &reader, index);
 
-        @memset(slice_data, 0);
+        @memset(slice_data[0 .. luma_slice_len + 2 * chroma_slice_len], 0);
 
         const luma_data = slice_data[0..luma_slice_len];
-        const u_data = slice_data[2 * luma_slice_len ..][0..chroma_slice_len];
-        const v_data = slice_data[2 * luma_slice_len + 2 * chroma_slice_len ..][0..chroma_slice_len];
+        const u_data = slice_data[luma_slice_len..][0..chroma_slice_len];
+        const v_data = slice_data[luma_slice_len + chroma_slice_len ..][0..chroma_slice_len];
 
         const pos = getSlicePos(index, luma_slices_per_row, slice_width, slice_height);
 
@@ -721,11 +714,8 @@ pub inline fn fastMin(a: anytype, b: @TypeOf(a)) @TypeOf(a) {
     return a - (c + @abs(c)) * @as(@TypeOf(a), @splat(0.5)); // splat(@TypeOf(a), 0.5);
 }
 
-inline fn idct_8x8(block: [64]i32, scaling_matrix: @Vector(64, f32)) [64]u16 {
-    var float_block: [64]f32 = @as(
-        @Vector(64, f32),
-        @floatFromInt(@as(@Vector(64, i32), block)),
-    );
+inline fn idct_8x8(block: [64]f32, scaling_matrix: @Vector(64, f32)) [64]u16 {
+    var float_block: [64]f32 = block;
 
     const Vec = @Vector(64, f32);
     var float_vec: Vec = float_block;
@@ -750,6 +740,7 @@ inline fn idct_8x8(block: [64]i32, scaling_matrix: @Vector(64, f32)) [64]u16 {
     return @as(@Vector(64, u16), @intCast(as_u32));
 }
 
+// Based on https://www.nayuki.io/res/fast-discrete-cosine-transform-algorithms/fast-dct-8.c
 inline fn idct_columns(block: *[64]f32) void {
     const V = @Vector(8, f32);
 
