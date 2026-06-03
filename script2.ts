@@ -76,7 +76,8 @@ new Uint8Array(memory.buffer).set(packet.data, packetPtr);
 if (true) {
 	const warmup = 20;
 	for (let i = 0; i < warmup; i++) {
-		console.log("Decode result", exports.decodePacket(decoder));
+		exports.decodePacket(decoder)
+		//console.log("Decode result", exports.decodePacket(decoder));
 	}
 }
 
@@ -84,10 +85,13 @@ const start = performance.now();
 const iters = 100;
 
 for (let i = 0; i < iters; i++) {
-	console.log("Decode result", exports.decodePacket(decoder));
+	exports.decodePacket(decoder)
+	//console.log("Decode result", exports.decodePacket(decoder));
 }
 
 const end = performance.now();
+
+//console.log((end - start) / iters);
 
 setTimeout(() => {
 	alert((end - start) / iters);

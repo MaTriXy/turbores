@@ -49,18 +49,6 @@ fn transpose_scan_values(s: [64]u8) [64]u8 {
     return result;
 }
 
-inline fn transpose_8x8(Element: type, matrix: [64]Element) [64]Element {
-    var result: [64]Element = undefined;
-
-    inline for (0..8) |x| {
-        inline for (0..8) |y| {
-            result[8 * y + x] = matrix[8 * x + y];
-        }
-    }
-
-    return result;
-}
-
 const Decoder = struct {
     packet: []u8,
     frame_data: []u16,
@@ -148,13 +136,13 @@ inline fn parseSliceHeader(slice_sizes: []u16, reader: *ByteReader, i: usize) Sl
 }
 
 const DcState = struct {
-    bit_reader: *BitReader,
+    bit_reader: BitReader,
     slice_data: []f32,
     code: i32,
     sign: i32,
     prev_dc: i32,
 
-    inline fn init(bit_reader: *BitReader, slice_data: []f32) DcState {
+    inline fn init(bit_reader: BitReader, slice_data: []f32) DcState {
         var s = DcState{
             .bit_reader = bit_reader,
             .slice_data = slice_data,
@@ -216,7 +204,7 @@ const DcState = struct {
 };
 
 const AcState = struct {
-    bit_reader: *BitReader,
+    bit_reader: BitReader,
     slice_data: []f32,
     pos: u32,
     log2_block_count: u5,
@@ -241,18 +229,18 @@ const AcState = struct {
         self.level = @as(i32, @intCast(level_result.value)) + 1;
 
         const j = self.pos >> self.log2_block_count;
-        const thing = run_result.bits + level_result.bits + 1;
-        const sign = -@as(i32, @intCast((self.bit_reader.current >> @as(u6, @intCast(64 - thing))) & 1));
-        self.bit_reader.consume(@intCast(thing));
+        const total_bits = run_result.bits + level_result.bits + 1;
+        const sign = -@as(i32, @intCast((self.bit_reader.current >> @as(u6, @intCast(64 - total_bits))) & 1));
+        self.bit_reader.consume(@intCast(total_bits));
         self.slice_data[((self.pos & self.block_mask) << 6) + scan_order[j]] = @floatFromInt((self.level ^ sign) - sign);
 
         return true;
     }
 };
 
-fn parseDcPair(
-    bit_reader_1: *BitReader,
-    bit_reader_2: *BitReader,
+inline fn parseDcAndAcPair(
+    bit_reader_1: BitReader,
+    bit_reader_2: BitReader,
     slice_1_data: []f32,
     slice_2_data: []f32,
     num_blocks: u32,
@@ -265,27 +253,19 @@ fn parseDcPair(
         dc_state_1.step(j);
         dc_state_2.step(j);
     }
-}
 
-fn parseAcPair(
-    bit_reader_1: *BitReader,
-    bit_reader_2: *BitReader,
-    slice_1_data: []f32,
-    slice_2_data: []f32,
-    num_blocks: u32,
-) void {
     const log2_block_count: u5 = @intCast(std.math.log2_int(u32, num_blocks));
     const block_mask = num_blocks - 1;
 
     var ac_state_1 = AcState{
-        .bit_reader = bit_reader_1,
+        .bit_reader = dc_state_1.bit_reader,
         .slice_data = slice_1_data,
         .pos = block_mask,
         .log2_block_count = log2_block_count,
         .block_mask = block_mask,
     };
     var ac_state_2 = AcState{
-        .bit_reader = bit_reader_2,
+        .bit_reader = dc_state_2.bit_reader,
         .slice_data = slice_2_data,
         .pos = block_mask,
         .log2_block_count = log2_block_count,
@@ -302,21 +282,19 @@ fn parseAcPair(
     while (active_2) active_2 = ac_state_2.step();
 }
 
-fn parseDcSingle(bit_reader: *BitReader, slice_data: []f32, num_blocks: u32) void {
+fn parseDcAndAcSingle(bit_reader: BitReader, slice_data: []f32, num_blocks: u32) void {
     var dc_state = DcState.init(bit_reader, slice_data);
 
     var j: u32 = 2;
     while (j < num_blocks) : (j += 2) {
         dc_state.step(j);
     }
-}
 
-fn parseAcSingle(bit_reader: *BitReader, slice_data: []f32, num_blocks: u32) void {
     const log2_block_count: u5 = @intCast(std.math.log2_int(u32, num_blocks));
     const block_mask = num_blocks - 1;
 
     var ac_state = AcState{
-        .bit_reader = bit_reader,
+        .bit_reader = dc_state.bit_reader,
         .slice_data = slice_data,
         .pos = block_mask,
         .log2_block_count = log2_block_count,
@@ -532,9 +510,9 @@ fn decodePacketInternal(decoder: *Decoder) !void {
         const index_1 = slice_indices[i];
         const index_2 = slice_indices[i + 1];
         reader.pos = slice_offsets[index_1];
-        var header_1 = parseSliceHeader(slice_sizes, &reader, index_1);
+        const header_1 = parseSliceHeader(slice_sizes, &reader, index_1);
         reader.pos = slice_offsets[index_2];
-        var header_2 = parseSliceHeader(slice_sizes, &reader, index_2);
+        const header_2 = parseSliceHeader(slice_sizes, &reader, index_2);
 
         // AC parameters are sparse, so we must memset them all to zero
         @memset(slice_data, 0);
@@ -552,16 +530,9 @@ fn decodePacketInternal(decoder: *Decoder) !void {
         const chroma_vec_2 = @as(@Vector(64, f32), chroma_scaling_matrix) * scale_2;
 
         // Luma for slice 1 and 2
-        parseDcPair(
-            &header_1.luma_bit_reader,
-            &header_2.luma_bit_reader,
-            slice_1_luma_data,
-            slice_2_luma_data,
-            num_luma_blocks,
-        );
-        parseAcPair(
-            &header_1.luma_bit_reader,
-            &header_2.luma_bit_reader,
+        parseDcAndAcPair(
+            header_1.luma_bit_reader,
+            header_2.luma_bit_reader,
             slice_1_luma_data,
             slice_2_luma_data,
             num_luma_blocks,
@@ -586,16 +557,9 @@ fn decodePacketInternal(decoder: *Decoder) !void {
         );
 
         // U for slice 1 and 2
-        parseDcPair(
-            &header_1.u_bit_reader,
-            &header_2.u_bit_reader,
-            slice_1_u_data,
-            slice_2_u_data,
-            num_chroma_blocks,
-        );
-        parseAcPair(
-            &header_1.u_bit_reader,
-            &header_2.u_bit_reader,
+        parseDcAndAcPair(
+            header_1.u_bit_reader,
+            header_2.u_bit_reader,
             slice_1_u_data,
             slice_2_u_data,
             num_chroma_blocks,
@@ -620,16 +584,9 @@ fn decodePacketInternal(decoder: *Decoder) !void {
         );
 
         // V for slice 1 and 2
-        parseDcPair(
-            &header_1.v_bit_reader,
-            &header_2.v_bit_reader,
-            slice_1_v_data,
-            slice_2_v_data,
-            num_chroma_blocks,
-        );
-        parseAcPair(
-            &header_1.v_bit_reader,
-            &header_2.v_bit_reader,
+        parseDcAndAcPair(
+            header_1.v_bit_reader,
+            header_2.v_bit_reader,
             slice_1_v_data,
             slice_2_v_data,
             num_chroma_blocks,
@@ -658,7 +615,7 @@ fn decodePacketInternal(decoder: *Decoder) !void {
     if (i < total_slices) {
         const index = slice_indices[i];
         reader.pos = slice_offsets[index];
-        var header = parseSliceHeader(slice_sizes, &reader, index);
+        const header = parseSliceHeader(slice_sizes, &reader, index);
 
         @memset(slice_data[0 .. luma_slice_len + 2 * chroma_slice_len], 0);
 
@@ -673,18 +630,15 @@ fn decodePacketInternal(decoder: *Decoder) !void {
         const chroma_vec = @as(@Vector(64, f32), chroma_scaling_matrix) * scale;
 
         // Luma
-        parseDcSingle(&header.luma_bit_reader, luma_data, num_luma_blocks);
-        parseAcSingle(&header.luma_bit_reader, luma_data, num_luma_blocks);
+        parseDcAndAcSingle(header.luma_bit_reader, luma_data, num_luma_blocks);
         transformAndStoreSliceData(decoder, luma_data, luma_frame_data, luma_vec, pos, num_luma_blocks, 4);
 
         // U
-        parseDcSingle(&header.u_bit_reader, u_data, num_chroma_blocks);
-        parseAcSingle(&header.u_bit_reader, u_data, num_chroma_blocks);
+        parseDcAndAcSingle(header.u_bit_reader, u_data, num_chroma_blocks);
         transformAndStoreSliceData(decoder, u_data, u_frame_data, chroma_vec, pos, num_chroma_blocks, 2);
 
         // V
-        parseDcSingle(&header.v_bit_reader, v_data, num_chroma_blocks);
-        parseAcSingle(&header.v_bit_reader, v_data, num_chroma_blocks);
+        parseDcAndAcSingle(header.v_bit_reader, v_data, num_chroma_blocks);
         transformAndStoreSliceData(decoder, v_data, v_frame_data, chroma_vec, pos, num_chroma_blocks, 2);
     }
 }
@@ -709,49 +663,51 @@ const A = [_]f32{
     0.382683432365089771728460,
 };
 
-pub inline fn fastMin(a: anytype, b: @TypeOf(a)) @TypeOf(a) {
-    const c = a - b;
-    return a - (c + @abs(c)) * @as(@TypeOf(a), @splat(0.5)); // splat(@TypeOf(a), 0.5);
-}
-
 inline fn idct_8x8(block: [64]f32, scaling_matrix: @Vector(64, f32)) [64]u16 {
-    var float_block: [64]f32 = block;
-
     const Vec = @Vector(64, f32);
-    var float_vec: Vec = float_block;
+    var float_vec: Vec = block;
     float_vec *= scaling_matrix;
     float_vec[0] += comptime 4096 / (S[0] * S[0]); // Add the DC dequant offset but pre-scaled
 
-    float_block = float_vec;
+    // Let's keep the eight rows in vector registers across both column passes and the transpose
+    var rows: [8]V8 = undefined;
+    inline for (0..8) |r| {
+        const mask = comptime blk: {
+            var m: [8]i32 = undefined;
+            for (0..8) |k| m[k] = @intCast(8 * r + k);
+            break :blk m;
+        };
+        rows[r] = @shuffle(f32, float_vec, undefined, mask);
+    }
 
-    idct_columns(&float_block);
-    float_block = transpose_8x8(f32, float_block);
-    idct_columns(&float_block);
-
-    float_vec = float_block;
+    rows = idct_columns(rows);
+    rows = transpose_rows(rows);
+    rows = idct_columns(rows);
 
     // WASM doesn't have a neat f32->u16 instruction, so we first do f32->u32, followed by u32->u16!
-    var as_u32: @Vector(64, u32) = @intFromFloat(float_vec);
+    // f32->u32 already clamps the bottom at 0, so we only need to clamp the top (cheaper as int).
+    var result: [64]u16 = undefined;
+    inline for (0..8) |r| {
+        var as_u32: @Vector(8, u32) = @intFromFloat(rows[r]);
+        as_u32 = @min(as_u32, @as(@Vector(8, u32), @splat(1023)));
+        result[8 * r ..][0..8].* = @as(@Vector(8, u16), @intCast(as_u32));
+    }
 
-    // Already clamped at 0 due to the f32->u32 conversion, now let's clamp the upper end (it's faster for int than
-    // for float).
-    as_u32 = @min(as_u32, @as(@Vector(64, u32), @splat(1023)));
-
-    return @as(@Vector(64, u16), @intCast(as_u32));
+    return result;
 }
 
 // Based on https://www.nayuki.io/res/fast-discrete-cosine-transform-algorithms/fast-dct-8.c
-inline fn idct_columns(block: *[64]f32) void {
-    const V = @Vector(8, f32);
+inline fn idct_columns(rows: [8]V8) [8]V8 {
+    const V = V8;
 
-    const v15: V = block[0..8].*;
-    const v26: V = block[8..16].*;
-    const v21: V = block[16..24].*;
-    const v28: V = block[24..32].*;
-    const v16: V = block[32..40].*;
-    const v25: V = block[40..48].*;
-    const v22: V = block[48..56].*;
-    const v27: V = block[56..64].*;
+    const v15: V = rows[0];
+    const v26: V = rows[1];
+    const v21: V = rows[2];
+    const v28: V = rows[3];
+    const v16: V = rows[4];
+    const v25: V = rows[5];
+    const v22: V = rows[6];
+    const v27: V = rows[7];
 
     const v19 = v25 - v28;
     const v20 = v26 - v27;
@@ -785,14 +741,56 @@ inline fn idct_columns(block: *[64]f32) void {
     const v2 = v9 - v10;
     const v3 = v8 - v11;
 
-    block[0..8].* = v0 + v7;
-    block[8..16].* = v1 + v6;
-    block[16..24].* = v2 + v5;
-    block[24..32].* = v3 - v4;
-    block[32..40].* = v3 + v4;
-    block[40..48].* = v2 - v5;
-    block[48..56].* = v1 - v6;
-    block[56..64].* = v0 - v7;
+    return .{
+        v0 + v7,
+        v1 + v6,
+        v2 + v5,
+        v3 - v4,
+        v3 + v4,
+        v2 - v5,
+        v1 - v6,
+        v0 - v7,
+    };
+}
+
+// Transpose the 8 row-vectors of an 8x8 block via the 4x4-quadrant shuffle method
+inline fn transpose_rows(rows: [8]V8) [8]V8 {
+    var lo: [8]V4 = undefined;
+    var hi: [8]V4 = undefined;
+    inline for (0..8) |r| {
+        lo[r] = @shuffle(f32, rows[r], undefined, [4]i32{ 0, 1, 2, 3 });
+        hi[r] = @shuffle(f32, rows[r], undefined, [4]i32{ 4, 5, 6, 7 });
+    }
+
+    const a = transpose_4x4(lo[0], lo[1], lo[2], lo[3]); // out rows 0..3, cols 0..3
+    const b = transpose_4x4(hi[0], hi[1], hi[2], hi[3]); // out rows 4..7, cols 0..3
+    const c = transpose_4x4(lo[4], lo[5], lo[6], lo[7]); // out rows 0..3, cols 4..7
+    const d = transpose_4x4(hi[4], hi[5], hi[6], hi[7]); // out rows 4..7, cols 4..7
+
+    var result: [8]V8 = undefined;
+    inline for (0..4) |i| {
+        result[i] = @shuffle(f32, a[i], c[i], [8]i32{ 0, 1, 2, 3, -1, -2, -3, -4 });
+        result[i + 4] = @shuffle(f32, b[i], d[i], [8]i32{ 0, 1, 2, 3, -1, -2, -3, -4 });
+    }
+
+    return result;
+}
+
+const V4 = @Vector(4, f32);
+const V8 = @Vector(8, f32);
+
+inline fn transpose_4x4(v0: V4, v1: V4, v2: V4, v3: V4) [4]V4 {
+    const lo01 = @shuffle(f32, v0, v1, [4]i32{ 0, -1, 1, -2 });
+    const hi01 = @shuffle(f32, v0, v1, [4]i32{ 2, -3, 3, -4 });
+    const lo23 = @shuffle(f32, v2, v3, [4]i32{ 0, -1, 1, -2 });
+    const hi23 = @shuffle(f32, v2, v3, [4]i32{ 2, -3, 3, -4 });
+
+    return .{
+        @shuffle(f32, lo01, lo23, [4]i32{ 0, 1, -1, -2 }),
+        @shuffle(f32, lo01, lo23, [4]i32{ 2, 3, -3, -4 }),
+        @shuffle(f32, hi01, hi23, [4]i32{ 0, 1, -1, -2 }),
+        @shuffle(f32, hi01, hi23, [4]i32{ 2, 3, -3, -4 }),
+    };
 }
 
 const ByteReader = struct {
