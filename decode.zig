@@ -466,7 +466,7 @@ fn decodePacketInternal(decoder: *Decoder) !void {
     const luma_slice_len = 64 * num_luma_blocks;
     const chroma_slice_len = 64 * num_chroma_blocks;
 
-    const slice_data = try arena.alloc(f32, 2 * luma_slice_len + 4 * chroma_slice_len);
+    const slice_data = try arena.alloc(f32, 2 * (luma_slice_len + 2 * chroma_slice_len));
 
     printValues(.{ pic_hdr_size, pic_data_size, total_slices, slice_dimensions, slice_width, slice_height, slice_sizes });
 
