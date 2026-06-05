@@ -903,7 +903,9 @@ const BitReader = struct {
 
             // This version is faster than a generic for loop that reads bytes
             switch (remaining) {
-                0 => {},
+                0 => {
+                    next_word = 0;
+                },
                 inline 1...7 => |remaining_captured| {
                     const int_type = @Int(.unsigned, remaining_captured << 3);
                     next_word = self.reader.takeInt(int_type);
