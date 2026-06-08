@@ -32,7 +32,7 @@ console.log(decoder)
 //await new Promise(() => {});
 
 const input = new Input({
-    source: new UrlSource('./prores-buck-bunny-1904.mov'),
+    source: new UrlSource('./prores-buck-bunny-444.mov'),
     formats: ALL_FORMATS,
 });
 
@@ -55,7 +55,7 @@ for await (const packet of sink.packets()) {
 	packetDatas.push(packet.data);
 }
 
-//packetDatas.splice(0, 100);
+//packetDatas.splice(0, 50);
 
 const start = performance.now();
 let total = 0;
@@ -79,11 +79,11 @@ for (let i = 0; i < fileIters; i++) {
 		const codedWidth = exports.getCodedWidth(decoder);
 		const codedHeight = exports.getCodedHeight(decoder);
 		const frameDataPtr = exports.getFrameDataPtr(decoder);
-		const frameData = new Uint16Array(memory.buffer, frameDataPtr, 2 * codedWidth * codedHeight);
+		const frameData = new Uint16Array(memory.buffer, frameDataPtr, 3 * codedWidth * codedHeight);
 		//console.log(frameData);
 
 		const frame = new VideoFrame(frameData, {
-			format: 'I422P10' as VideoPixelFormat,
+			format: 'I444P10' as VideoPixelFormat,
 			codedWidth,
 			codedHeight,
 			timestamp: 0,
