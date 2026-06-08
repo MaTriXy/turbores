@@ -32,7 +32,7 @@ console.log(decoder)
 //await new Promise(() => {});
 
 const input = new Input({
-    source: new UrlSource('./IMG_0159-prores-hdr.MOV'),
+    source: new UrlSource('./prores-buck-bunny-1904.mov'),
     formats: ALL_FORMATS,
 });
 
@@ -50,13 +50,15 @@ const canvas = document.createElement('canvas');
 const context = canvas.getContext('2d')!;
 document.body.append(canvas);
 
-const start = performance.now();
-let total = 0;
-
 const packetDatas: Uint8Array[] = [];
 for await (const packet of sink.packets()) {
 	packetDatas.push(packet.data);
 }
+
+//packetDatas.splice(0, 100);
+
+const start = performance.now();
+let total = 0;
 
 const fileIters = 10;
 
@@ -96,6 +98,8 @@ for (let i = 0; i < fileIters; i++) {
 
 		context.drawImage(frame, 0, 0);
 		frame.close();
+
+		break;
 	}
 }
 
