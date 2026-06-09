@@ -195,6 +195,8 @@ const Decoder = struct {
     luma_scaling_matrix: [64]f32,
     chroma_scaling_matrix: [64]f32,
     log2_chroma_blocks_per_mb: u5,
+    alpha_bit_depth: u32,
+    bit_depth: u32,
     tasks: []WorkerDecodeTask,
     running_task_count: std.atomic.Value(u32),
     wait_word: u32,
@@ -223,6 +225,8 @@ export fn createDecoder() *Decoder {
         .luma_scaling_matrix = undefined,
         .chroma_scaling_matrix = undefined,
         .log2_chroma_blocks_per_mb = undefined,
+        .alpha_bit_depth = undefined,
+        .bit_depth = 10, // Hardcoded for now, must be passed in from the outside
         .tasks = &.{},
         .running_task_count = .init(0),
         .wait_word = 0,
@@ -337,6 +341,7 @@ fn executeDecodeTask(task: *WorkerDecodeTask) !void {
     const luma_frame_data = decoder.frame_data[0 .. decoder.coded_width * decoder.coded_height];
     const u_frame_data = decoder.frame_data[decoder.coded_width * decoder.coded_height ..][0..chroma_entries];
     const v_frame_data = decoder.frame_data[decoder.coded_width * decoder.coded_height + chroma_entries ..][0..chroma_entries];
+    const alpha_frame_data = decoder.frame_data[decoder.coded_width * decoder.coded_height + (chroma_entries << 1) ..];
 
     // Aligned for SIMD access
     const slice_data = try gpa.alignedAlloc(f32, .@"16", (max_luma_slice_len + (max_chroma_slice_len << 1)) << 1);
@@ -348,6 +353,8 @@ fn executeDecodeTask(task: *WorkerDecodeTask) !void {
     const slice_2_u_data = slice_data[(max_luma_slice_len << 1) + 1 * max_chroma_slice_len ..][0..max_chroma_slice_len];
     const slice_1_v_data = slice_data[(max_luma_slice_len << 1) + 2 * max_chroma_slice_len ..][0..max_chroma_slice_len];
     const slice_2_v_data = slice_data[(max_luma_slice_len << 1) + 3 * max_chroma_slice_len ..][0..max_chroma_slice_len];
+
+    const has_alpha = decoder.alpha_bit_depth != 0;
 
     var i: usize = 0;
     while (i + 1 < slice_count) : (i += 2) {
@@ -386,8 +393,8 @@ fn executeDecodeTask(task: *WorkerDecodeTask) !void {
 
         // Luma for slice 1 and 2
         parseDcAndAcPair(
-            header_1.luma_bit_reader,
-            header_2.luma_bit_reader,
+            header_1.luma_data,
+            header_2.luma_data,
             slice_1_luma_data,
             slice_2_luma_data,
             num_luma_blocks_1,
@@ -416,8 +423,8 @@ fn executeDecodeTask(task: *WorkerDecodeTask) !void {
 
         // U for slice 1 and 2
         parseDcAndAcPair(
-            header_1.u_bit_reader,
-            header_2.u_bit_reader,
+            header_1.u_data,
+            header_2.u_data,
             slice_1_u_data,
             slice_2_u_data,
             num_chroma_blocks_1,
@@ -446,8 +453,8 @@ fn executeDecodeTask(task: *WorkerDecodeTask) !void {
 
         // V for slice 1 and 2
         parseDcAndAcPair(
-            header_1.v_bit_reader,
-            header_2.v_bit_reader,
+            header_1.v_data,
+            header_2.v_data,
             slice_1_v_data,
             slice_2_v_data,
             num_chroma_blocks_1,
@@ -473,6 +480,46 @@ fn executeDecodeTask(task: *WorkerDecodeTask) !void {
             decoder.log2_chroma_blocks_per_mb,
             true,
         );
+
+        if (has_alpha) {
+            switch (decoder.alpha_bit_depth) {
+                inline 8, 16 => |source_bit_depth| {
+                    switch (decoder.bit_depth) {
+                        inline 10, 12 => |target_bit_depth| {
+                            // Alpha is not decoded in an interleaved fashion, because it was slower than the
+                            // naive approach
+
+                            // Alpha for slice 1
+                            parseAndStoreAlpha(
+                                header_1.alpha_data,
+                                alpha_frame_data,
+                                pos_1.x,
+                                pos_1.y,
+                                header_1.width_mb << 4,
+                                num_luma_blocks_1 << 6,
+                                decoder.coded_width,
+                                source_bit_depth,
+                                target_bit_depth,
+                            );
+                            // Alpha for slice 2
+                            parseAndStoreAlpha(
+                                header_2.alpha_data,
+                                alpha_frame_data,
+                                pos_2.x,
+                                pos_2.y,
+                                header_2.width_mb << 4,
+                                num_luma_blocks_2 << 6,
+                                decoder.coded_width,
+                                source_bit_depth,
+                                target_bit_depth,
+                            );
+                        },
+                        else => unreachable,
+                    }
+                },
+                else => unreachable,
+            }
+        }
     }
 
     // Odd slice count leaves one slice over; decode it on its own
@@ -502,7 +549,7 @@ fn executeDecodeTask(task: *WorkerDecodeTask) !void {
         const chroma_vec = @as(@Vector(64, f32), chroma_scaling_matrix) * scale;
 
         // Luma
-        parseDcAndAcSingle(header.luma_bit_reader, luma_data, num_luma_blocks);
+        parseDcAndAcSingle(header.luma_data, luma_data, num_luma_blocks);
         transformAndStoreSliceData(
             decoder,
             luma_data,
@@ -515,7 +562,7 @@ fn executeDecodeTask(task: *WorkerDecodeTask) !void {
         );
 
         // U
-        parseDcAndAcSingle(header.u_bit_reader, u_data, num_chroma_blocks);
+        parseDcAndAcSingle(header.u_data, u_data, num_chroma_blocks);
         transformAndStoreSliceData(
             decoder,
             u_data,
@@ -528,7 +575,7 @@ fn executeDecodeTask(task: *WorkerDecodeTask) !void {
         );
 
         // V
-        parseDcAndAcSingle(header.v_bit_reader, v_data, num_chroma_blocks);
+        parseDcAndAcSingle(header.v_data, v_data, num_chroma_blocks);
         transformAndStoreSliceData(
             decoder,
             v_data,
@@ -539,6 +586,30 @@ fn executeDecodeTask(task: *WorkerDecodeTask) !void {
             decoder.log2_chroma_blocks_per_mb,
             true,
         );
+
+        if (has_alpha) {
+            switch (decoder.alpha_bit_depth) {
+                inline 8, 16 => |source_bit_depth| {
+                    switch (decoder.bit_depth) {
+                        inline 10, 12 => |target_bit_depth| {
+                            parseAndStoreAlpha(
+                                header.alpha_data,
+                                alpha_frame_data,
+                                pos.x,
+                                pos.y,
+                                header.width_mb << 4,
+                                num_luma_blocks << 6,
+                                decoder.coded_width,
+                                source_bit_depth,
+                                target_bit_depth,
+                            );
+                        },
+                        else => unreachable,
+                    }
+                },
+                else => unreachable,
+            }
+        }
     }
 
     if (decoder.running_task_count.fetchSub(1, .monotonic) == 1) {
@@ -548,9 +619,10 @@ fn executeDecodeTask(task: *WorkerDecodeTask) !void {
 
 const SliceHeader = struct {
     scale_factor: u32,
-    luma_bit_reader: BitReader,
-    u_bit_reader: BitReader,
-    v_bit_reader: BitReader,
+    luma_data: []u8,
+    u_data: []u8,
+    v_data: []u8,
+    alpha_data: []u8,
     width_mb: u32,
     height_mb: u32,
     pos_x_mb: u32,
@@ -559,7 +631,7 @@ const SliceHeader = struct {
 
 inline fn parseSliceHeader(decoder: *Decoder, reader: *ByteReader, i: usize) SliceHeader {
     const slice_size = decoder.slice_sizes[i];
-    const slice_hdr_size = reader.takeInt(u8);
+    const slice_hdr_size = reader.takeInt(u8) >> 3;
 
     var scale_factor: u32 = reader.takeInt(u8);
     if (scale_factor > 128) {
@@ -568,20 +640,26 @@ inline fn parseSliceHeader(decoder: *Decoder, reader: *ByteReader, i: usize) Sli
 
     const luma_data_size = reader.takeInt(u16);
     const u_data_size = reader.takeInt(u16);
-    const v_data_size = slice_size - luma_data_size - u_data_size - @divExact(slice_hdr_size, 8);
+    const v_data_size = if (slice_hdr_size >= 8)
+        reader.takeInt(u16) // There's a special field for V data size
+    else
+        slice_size - luma_data_size - u_data_size - slice_hdr_size;
+    const alpha_data_size = slice_size - luma_data_size - u_data_size - v_data_size - slice_hdr_size;
 
     const luma_data = reader.take(luma_data_size);
     const u_data = reader.take(u_data_size);
     const v_data = reader.take(v_data_size);
+    const alpha_data = reader.take(alpha_data_size);
 
     const y_index = i / decoder.slice_info_in_row.len;
     const x_index = i - y_index * decoder.slice_info_in_row.len; // No % so we don't need two int divisions
 
     return .{
         .scale_factor = scale_factor,
-        .luma_bit_reader = BitReader.fromData(luma_data),
-        .u_bit_reader = BitReader.fromData(u_data),
-        .v_bit_reader = BitReader.fromData(v_data),
+        .luma_data = luma_data,
+        .u_data = u_data,
+        .v_data = v_data,
+        .alpha_data = alpha_data,
         .width_mb = decoder.slice_info_in_row.items(.size)[x_index],
         .height_mb = decoder.slice_info_in_column.items(.size)[y_index],
         .pos_x_mb = decoder.slice_info_in_row.items(.pos)[x_index],
@@ -596,9 +674,9 @@ const DcState = struct {
     sign: i32,
     prev_dc: i32,
 
-    inline fn init(bit_reader: BitReader, slice_data: []f32) DcState {
+    inline fn init(data: []u8, slice_data: []f32) DcState {
         var s = DcState{
-            .bit_reader = bit_reader,
+            .bit_reader = BitReader.fromData(data),
             .slice_data = slice_data,
             .code = undefined,
             .sign = undefined,
@@ -692,16 +770,119 @@ const AcState = struct {
     }
 };
 
-inline fn parseDcAndAcPair(
-    bit_reader_1: BitReader,
-    bit_reader_2: BitReader,
+fn AlphaState(source_bit_depth: comptime_int, target_bit_depth: comptime_int) type {
+    const mask = comptime (@as(i64, 1) << @as(u6, @intCast(source_bit_depth))) - 1;
+    const signed_code_length = comptime if (source_bit_depth == 16) 7 else 4;
+    const bit_difference = target_bit_depth - source_bit_depth;
+
+    return struct {
+        bit_reader: BitReader,
+        frame_data: []u16,
+        x: usize,
+        y_offset: usize,
+        slice_width: usize,
+        num_values: usize,
+        coded_width: usize,
+        pos: u32,
+        alpha_val: i64,
+        x_mask: usize,
+        log2_slice_width: u5,
+
+        inline fn init(data: []u8, frame_data: []u16, x: usize, y: usize, slice_width: usize, num_values: usize, coded_width: usize) @This() {
+            return .{
+                .bit_reader = BitReader.fromData(data),
+                .frame_data = frame_data,
+                .x = x,
+                .y_offset = y * coded_width,
+                .slice_width = slice_width,
+                .num_values = num_values,
+                .coded_width = coded_width,
+                .pos = 0,
+                .alpha_val = mask,
+                .x_mask = slice_width - 1,
+                .log2_slice_width = std.math.log2_int(usize, slice_width),
+            };
+        }
+
+        inline fn step(self: *@This()) bool {
+            self.bit_reader.maybeLoadData();
+
+            var val: i64 = undefined;
+
+            const first_bit_not_zero = (self.bit_reader.current & comptime 1 << 63) != 0;
+
+            if (first_bit_not_zero) {
+                val = @intCast((self.bit_reader.current & comptime ~@as(u64, 1 << 63)) >> @as(u6, @intCast(63 - source_bit_depth)));
+            } else {
+                val = @intCast((self.bit_reader.current & comptime ~@as(u64, 1 << 63)) >> @as(u6, @intCast(63 - signed_code_length)));
+                const sign = val & 1;
+                val = (val + 2) >> 1;
+                val = (val ^ -sign) + sign;
+            }
+
+            var bits_read = if (first_bit_not_zero) @as(u64, source_bit_depth + 1) else @as(u64, signed_code_length + 1);
+
+            self.alpha_val = (self.alpha_val + val) & mask;
+
+            var final_value: u16 = @intCast(self.alpha_val);
+            if (bit_difference < 0) {
+                final_value >>= comptime -bit_difference;
+            } else {
+                // Upscale by bit replication: OR the top bits back into the freed low bits so that a full-scale
+                // source maps to a full-scale target
+                final_value = (final_value << bit_difference) | (final_value >> comptime (source_bit_depth - bit_difference));
+            }
+
+            self.writeValue(final_value, self.pos);
+
+            if ((self.bit_reader.current & (@as(u64, 1) << @as(u6, @intCast(63 - bits_read)))) == 0) {
+                var run = (self.bit_reader.current >> @as(u6, @intCast(59 - bits_read))) & 0b1111;
+
+                if (run == 0) {
+                    run = (self.bit_reader.current >> @as(u6, @intCast(48 - bits_read))) & 0b111_1111_1111;
+                    bits_read += comptime 1 + 15;
+                } else {
+                    bits_read += comptime 1 + 4;
+                }
+
+                const capped_run = @min(@as(u32, @intCast(run)), self.num_values - self.pos - 1);
+
+                // +1 because of the previous write
+                for (1..capped_run + 1) |i| {
+                    self.writeValue(final_value, self.pos + i);
+                }
+
+                self.pos += 1 + capped_run;
+            } else {
+                self.pos += 1;
+                bits_read += 1;
+            }
+
+            self.bit_reader.consume(bits_read);
+
+            return self.pos < self.num_values;
+        }
+
+        inline fn writeValue(self: *@This(), value: u16, pos: u32) void {
+            // Decoded alpha values are written directly into the frame data buffer
+            self.frame_data[
+                self.y_offset + self.coded_width * (pos >> self.log2_slice_width) +
+                    self.x + (pos & self.x_mask)
+            ] = value;
+        }
+    };
+}
+
+fn parseDcAndAcPair(
+    data_1: []u8,
+    data_2: []u8,
     slice_1_data: []f32,
     slice_2_data: []f32,
     num_blocks_1: u32,
     num_blocks_2: u32,
 ) void {
-    var dc_state_1 = DcState.init(bit_reader_1, slice_1_data);
-    var dc_state_2 = DcState.init(bit_reader_2, slice_2_data);
+    var dc_state_1 = DcState.init(data_1, slice_1_data);
+    var dc_state_2 = DcState.init(data_2, slice_2_data);
 
     var j: u32 = 2;
     const min_num_blocks = @min(num_blocks_1, num_blocks_2);
@@ -742,8 +923,8 @@ inline fn parseDcAndAcPair(
     while (active_2) active_2 = ac_state_2.step();
 }
 
-fn parseDcAndAcSingle(bit_reader: BitReader, slice_data: []f32, num_blocks: u32) void {
-    var dc_state = DcState.init(bit_reader, slice_data);
+fn parseDcAndAcSingle(data: []u8, slice_data: []f32, num_blocks: u32) void {
+    var dc_state = DcState.init(data, slice_data);
 
     var j: u32 = 2;
     while (j < num_blocks) : (j += 2) {
@@ -762,6 +943,29 @@ fn parseDcAndAcSingle(bit_reader: BitReader, slice_data: []f32, num_blocks: u32)
     };
 
     while (ac_state.step()) {}
+}
+
+fn parseAndStoreAlpha(
+    data: []u8,
+    frame_data: []u16,
+    x: usize,
+    y: usize,
+    slice_width: usize,
+    num_values: usize,
+    coded_width: usize,
+    comptime source_bit_depth: u64,
+    comptime target_bit_depth: u64,
+) void {
+    var alpha_state = AlphaState(source_bit_depth, target_bit_depth).init(
+        data,
+        frame_data,
+        x,
+        y,
+        slice_width,
+        num_values,
+        coded_width,
+    );
+    while (alpha_state.step()) {}
 }
 
 fn transformAndStoreSliceData(
@@ -839,10 +1043,6 @@ inline fn storeBlock(frame_data: []u16, coded_width: u32, result: [64]u16, x: u3
 const SlicePos = struct { x: u32, y: u32 };
 
 fn decodePacketInternal(decoder: *Decoder) !void {
-    var arena_state = std.heap.ArenaAllocator.init(gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
     var reader = ByteReader.init(decoder.packet);
 
     const frame_size = reader.takeInt(u32);
@@ -898,6 +1098,8 @@ fn decodePacketInternal(decoder: *Decoder) !void {
     std.debug.assert(chrominance_factor == 2 or chrominance_factor == 3);
     decoder.log2_chroma_blocks_per_mb = if (chrominance_factor == 2) 1 else 2;
 
+    decoder.alpha_bit_depth = alpha_info << 3;
+
     printValues(.{ frame_size, frame_type_outer, hdr_size, version, creator_id, frame_width, frame_height, frame_flags, chrominance_factor, frame_type, primaries, transfer_function, color_matrix, src_pix_format, alpha_info, q_mat_flags, q_mat_luma, q_mat_chroma });
 
     decoder.display_width = frame_width;
@@ -905,7 +1107,12 @@ fn decodePacketInternal(decoder: *Decoder) !void {
     decoder.coded_width = (frame_width + 15) & ~@as(u32, 15);
     decoder.coded_height = (frame_height + 15) & ~@as(u32, 15);
 
-    const frame_data_size = (decoder.log2_chroma_blocks_per_mb + 1) * (decoder.coded_width * decoder.coded_height);
+    var multiplier = decoder.log2_chroma_blocks_per_mb + 1;
+    if (alpha_info != 0) {
+        multiplier += 1;
+    }
+
+    const frame_data_size = multiplier * (decoder.coded_width * decoder.coded_height);
     decoder.frame_data = try gpa.realloc(decoder.frame_data, frame_data_size);
 
     const pic_hdr_size = reader.takeInt(u8);
@@ -969,7 +1176,7 @@ fn decodePacketInternal(decoder: *Decoder) !void {
     const fixed_per_slice = 100;
 
     var total_slice_size: usize = 0;
-    decoder.slice_sizes = try arena.realloc(decoder.slice_sizes, total_slices);
+    decoder.slice_sizes = try gpa.realloc(decoder.slice_sizes, total_slices);
     for (0..total_slices) |i| {
         const size: usize = reader.takeInt(u16);
 
@@ -977,7 +1184,7 @@ fn decodePacketInternal(decoder: *Decoder) !void {
         total_slice_size += size + fixed_per_slice;
     }
 
-    decoder.slice_offsets = try arena.realloc(decoder.slice_offsets, total_slices);
+    decoder.slice_offsets = try gpa.realloc(decoder.slice_offsets, total_slices);
 
     var current_offset: usize = reader.pos;
     for (0..total_slices) |i| {
@@ -985,7 +1192,7 @@ fn decodePacketInternal(decoder: *Decoder) !void {
         current_offset += decoder.slice_sizes[i];
     }
 
-    decoder.slice_indices = try arena.realloc(decoder.slice_indices, total_slices);
+    decoder.slice_indices = try gpa.realloc(decoder.slice_indices, total_slices);
 
     for (0..total_slices) |i| {
         decoder.slice_indices[i] = i;
@@ -1270,7 +1477,7 @@ const BitReader = struct {
     next: u64,
     bit_health: u64,
 
-    fn fromData(data: []u8) BitReader {
+    inline fn fromData(data: []u8) BitReader {
         return .{
             .reader = ByteReader.init(data),
             .current = 0,

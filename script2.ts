@@ -8,7 +8,7 @@ console.log(exports)
 
 exports.__wasm_init_tls(exports.allocateThreadLocalState(exports.__tls_size.value, exports.__tls_align.value));
 
-const concurrency = navigator.hardwareConcurrency;
+const concurrency = 1 ?? navigator.hardwareConcurrency;
 const workers: Worker[] = [];
 const promises: Promise<void>[] = [];
 
@@ -32,7 +32,7 @@ console.log(decoder)
 //await new Promise(() => {});
 
 const input = new Input({
-    source: new UrlSource('./prores-buck-bunny-444.mov'),
+    source: new UrlSource('./prores-transparent-2.mov'),
     formats: ALL_FORMATS,
 });
 
@@ -60,7 +60,7 @@ for await (const packet of sink.packets()) {
 const start = performance.now();
 let total = 0;
 
-const fileIters = 10;
+const fileIters = 1;
 
 for (let i = 0; i < fileIters; i++) {
 	for (const packetData of packetDatas) {
@@ -71,19 +71,23 @@ for (let i = 0; i < fileIters; i++) {
 		await decode();
 
 		total++;
+		break;
 		continue;
 
 		canvas.width = exports.getDisplayWidth(decoder);
 		canvas.height = exports.getDisplayHeight(decoder);
 
+		context.fillStyle = 'red';
+		context.fillRect(0, 0, canvas.width, canvas.height);
+
 		const codedWidth = exports.getCodedWidth(decoder);
 		const codedHeight = exports.getCodedHeight(decoder);
 		const frameDataPtr = exports.getFrameDataPtr(decoder);
-		const frameData = new Uint16Array(memory.buffer, frameDataPtr, 3 * codedWidth * codedHeight);
+		const frameData = new Uint16Array(memory.buffer, frameDataPtr, 4 * codedWidth * codedHeight);
 		//console.log(frameData);
 
 		const frame = new VideoFrame(frameData, {
-			format: 'I444P10' as VideoPixelFormat,
+			format: 'I444AP10' as VideoPixelFormat,
 			codedWidth,
 			codedHeight,
 			timestamp: 0,
@@ -99,12 +103,12 @@ for (let i = 0; i < fileIters; i++) {
 		context.drawImage(frame, 0, 0);
 		frame.close();
 
-		break;
+		//break;
 	}
 }
 
 console.log(packetDatas.length);
-alert((performance.now() - start) / fileIters);
+alert((performance.now() - start) / total);
 //const packet = (await sink.getFirstPacket())!;
 
 //await new Promise(() => {});
