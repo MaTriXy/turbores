@@ -1,5 +1,6 @@
 //! Copied from std lib to remove multithreading restriction. The allocator itself isn't thread-safe, but since we wrap
 //! every call in a mutex, we're good.
+//!
 //! Supports single-threaded targets that have a sbrk-like primitive which includes
 //! Linux and WebAssembly.
 //!

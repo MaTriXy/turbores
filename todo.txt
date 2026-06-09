@@ -1,0 +1,1 @@
+is_worker should indicate if the context is a worker context, not if it's the "main boy"

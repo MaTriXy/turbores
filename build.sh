@@ -11,7 +11,7 @@ zig build-exe \
     -rdynamic \
     -O $mode \
     -mcpu=generic+atomics+bulk_memory+multivalue+nontrapping_fptoint+reference_types+sign_ext+simd128+relaxed_simd \
-    -femit-bin=lib.wasm \
+    -femit-bin=build/lib.wasm \
     -fno-single-threaded \
     --import-memory \
     --shared-memory \
@@ -21,4 +21,4 @@ zig build-exe \
     --export=__tls_size \
     --export=__tls_align \
     --export=__wasm_init_tls \
-    decode.zig
+    src/index.zig

@@ -6,8 +6,6 @@ export const initWasmModule = async (memory: WebAssembly.Memory) => {
                 const bytes = new Uint8Array(memory.buffer, offset, length);
                 console.log(decodeUtf8(bytes));
             },
-            consoleTime: console.time,
-            consoleTimeEnd: console.timeEnd,
         },
     });
 
