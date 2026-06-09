@@ -184,11 +184,8 @@ const Decoder = struct {
     display_width: u32,
     display_height: u32,
     slice_width: u32,
-    slice_height: u32,
     slice_info_in_row: std.MultiArrayList(SliceInfo),
-    slice_info_in_column: std.MultiArrayList(SliceInfo),
     max_slice_width: u32,
-    max_slice_height: u32,
     slice_indices: []usize,
     slice_sizes: []usize,
     slice_offsets: []usize,
@@ -214,11 +211,8 @@ export fn createDecoder() *Decoder {
         .display_width = undefined,
         .display_height = undefined,
         .slice_width = undefined,
-        .slice_height = undefined,
         .slice_info_in_row = .empty,
-        .slice_info_in_column = .empty,
         .max_slice_width = undefined,
-        .max_slice_height = undefined,
         .slice_indices = &.{},
         .slice_sizes = &.{},
         .slice_offsets = &.{},
@@ -328,8 +322,8 @@ fn executeDecodeTask(task: *WorkerDecodeTask) !void {
 
     var reader = ByteReader.init(decoder.packet);
 
-    const max_num_luma_blocks = (decoder.max_slice_width * decoder.max_slice_height) << 2;
-    const max_num_chroma_blocks = (decoder.max_slice_width * decoder.max_slice_height) << decoder.log2_chroma_blocks_per_mb;
+    const max_num_luma_blocks = decoder.max_slice_width << 2;
+    const max_num_chroma_blocks = decoder.max_slice_width << decoder.log2_chroma_blocks_per_mb;
 
     const max_luma_slice_len = max_num_luma_blocks << 6;
     const max_chroma_slice_len = max_num_chroma_blocks << 6;
@@ -386,10 +380,10 @@ fn executeDecodeTask(task: *WorkerDecodeTask) !void {
         const chroma_vec_1 = @as(@Vector(64, f32), chroma_scaling_matrix) * scale_1;
         const chroma_vec_2 = @as(@Vector(64, f32), chroma_scaling_matrix) * scale_2;
 
-        const num_luma_blocks_1 = (header_1.width_mb * header_1.height_mb) << 2;
-        const num_luma_blocks_2 = (header_2.width_mb * header_2.height_mb) << 2;
-        const num_chroma_blocks_1 = (header_1.width_mb * header_1.height_mb) << decoder.log2_chroma_blocks_per_mb;
-        const num_chroma_blocks_2 = (header_2.width_mb * header_2.height_mb) << decoder.log2_chroma_blocks_per_mb;
+        const num_luma_blocks_1 = header_1.width_mb << 2;
+        const num_luma_blocks_2 = header_2.width_mb << 2;
+        const num_chroma_blocks_1 = header_1.width_mb << decoder.log2_chroma_blocks_per_mb;
+        const num_chroma_blocks_2 = header_2.width_mb << decoder.log2_chroma_blocks_per_mb;
 
         // Luma for slice 1 and 2
         parseDcAndAcPair(
@@ -528,8 +522,8 @@ fn executeDecodeTask(task: *WorkerDecodeTask) !void {
         reader.pos = decoder.slice_offsets[index];
         const header = parseSliceHeader(decoder, &reader, index);
 
-        const num_luma_blocks = (header.width_mb * header.height_mb) << 2;
-        const num_chroma_blocks = (header.width_mb * header.height_mb) << decoder.log2_chroma_blocks_per_mb;
+        const num_luma_blocks = header.width_mb << 2;
+        const num_chroma_blocks = header.width_mb << decoder.log2_chroma_blocks_per_mb;
         const luma_slice_len = num_luma_blocks << 6;
         const chroma_slice_len = num_chroma_blocks << 6;
 
@@ -624,7 +618,6 @@ const SliceHeader = struct {
     v_data: []u8,
     alpha_data: []u8,
     width_mb: u32,
-    height_mb: u32,
     pos_x_mb: u32,
     pos_y_mb: u32,
 };
@@ -661,9 +654,8 @@ inline fn parseSliceHeader(decoder: *Decoder, reader: *ByteReader, i: usize) Sli
         .v_data = v_data,
         .alpha_data = alpha_data,
         .width_mb = decoder.slice_info_in_row.items(.size)[x_index],
-        .height_mb = decoder.slice_info_in_column.items(.size)[y_index],
         .pos_x_mb = decoder.slice_info_in_row.items(.pos)[x_index],
-        .pos_y_mb = decoder.slice_info_in_column.items(.pos)[y_index],
+        .pos_y_mb = y_index,
     };
 }
 
@@ -1124,12 +1116,12 @@ fn decodePacketInternal(decoder: *Decoder) !void {
     _ = pic_data_size;
 
     decoder.slice_width = @as(u32, 1) << @as(u5, @intCast(slice_dimensions >> 4));
-    decoder.slice_height = @as(u32, 1) << @as(u5, @intCast(slice_dimensions & 0b1111));
+    // Apparently all other decoders only support this value, and therefore no encoder emits anything but this value, so
+    // we can hardcode it to simplify the code.
+    //decoder.slice_height = @as(u32, 1) << @as(u5, @intCast(slice_dimensions & 0b1111));
 
     decoder.slice_info_in_row.clearRetainingCapacity();
-    decoder.slice_info_in_column.clearRetainingCapacity();
     decoder.max_slice_width = 0;
-    decoder.max_slice_height = 0;
 
     var current_x: u16 = 0;
     const coded_width_in_macroblocks = decoder.coded_width >> 4;
@@ -1151,27 +1143,7 @@ fn decodePacketInternal(decoder: *Decoder) !void {
         }
     }
 
-    var current_y: u16 = 0;
-    const coded_height_in_macroblocks = decoder.coded_height >> 4;
-    while (current_y < coded_height_in_macroblocks) {
-        var height: u8 = @intCast(decoder.slice_height);
-        while (current_y + height > coded_height_in_macroblocks) {
-            height >>= 1;
-        }
-
-        try decoder.slice_info_in_column.append(gpa, .{
-            .pos = current_y,
-            .size = height,
-        });
-        current_y += height;
-
-        if (decoder.max_slice_height == 0) {
-            // The first slice has the maximum height (no other slice has a longer height)
-            decoder.max_slice_height = height;
-        }
-    }
-
-    printValues(.{ decoder.slice_width, decoder.slice_height, decoder.slice_info_in_row.items(.size), decoder.slice_info_in_column.items(.size) });
+    printValues(.{ decoder.slice_width, decoder.slice_info_in_row.items(.size) });
 
     const fixed_per_slice = 100;
 

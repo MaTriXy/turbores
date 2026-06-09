@@ -71,8 +71,8 @@ for (let i = 0; i < fileIters; i++) {
 		await decode();
 
 		total++;
-		break;
-		continue;
+		//break;
+		//continue;
 
 		canvas.width = exports.getDisplayWidth(decoder);
 		canvas.height = exports.getDisplayHeight(decoder);
@@ -103,7 +103,7 @@ for (let i = 0; i < fileIters; i++) {
 		context.drawImage(frame, 0, 0);
 		frame.close();
 
-		//break;
+		break;
 	}
 }
 
