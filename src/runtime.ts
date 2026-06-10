@@ -6,52 +6,47 @@ export type Runtime = {
     workers: Worker[];
 }
 
-let runtimePromise: Promise<Runtime | Error> | null = null;
+let runtimePromise: Promise<Runtime> | null = null;
 
-export const getRuntime = async () => {
-    runtimePromise ??= initRuntime();
-    const runtime = await runtimePromise;
-
-    // Don't cache a failed init; let the next caller try again
-    if (runtime instanceof Error) {
-        runtimePromise = null;
-    }
-
-    return runtime;
+export const getRuntime = () => {
+    return runtimePromise ??= initRuntime();
 };
 
-const initRuntime = async (): Promise<Runtime | Error> => {
-    try {
-        const memory = new WebAssembly.Memory({ initial: 32, maximum: 65536, shared: true });
-        const exports = await initWasmModule(memory);
+const initRuntime = async (): Promise<Runtime> => {
+    const memory = new WebAssembly.Memory({ initial: 32, maximum: 65536, shared: true });
+    const exports = await initWasmModule(memory);
 
-        exports.__wasm_init_tls(exports.allocateThreadLocalState(exports.__tls_size.value, exports.__tls_align.value));
+    const mainThreadTls = exports.allocateThreadLocalState(exports.__tls_size.value, exports.__tls_align.value);
+    if (mainThreadTls === 0) {
+        throw new Error('Failed to allocate thread-local state.');
+    }
+    exports.__wasm_init_tls(mainThreadTls);
 
-        const isBrowserMainThread =
-            typeof window !== "undefined" &&
-            typeof document !== "undefined" &&
-            self === window;
-        exports.setIsBrowserMainThread(Number(isBrowserMainThread));
+    const isBrowserMainThread =
+        typeof window !== "undefined" &&
+        typeof document !== "undefined" &&
+        self === window;
+    exports.setIsBrowserMainThread(Number(isBrowserMainThread));
 
-        const concurrency = navigator.hardwareConcurrency;
-        const workers: Worker[] = [];
-        const ready: Promise<void>[] = [];
+    const concurrency = navigator.hardwareConcurrency;
+    const workers: Worker[] = [];
+    const ready: Promise<void>[] = [];
 
-        for (let i = 0; i < concurrency; i++) {
-            const stackPointer = exports.allocateWorkerStack();
-            const tlsPointer = exports.allocateThreadLocalState(exports.__tls_size.value, exports.__tls_align.value);
-
-            const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
-            worker.postMessage({ memory, stackPointer, tlsPointer });
-
-            workers.push(worker);
-            ready.push(new Promise(resolve => worker.addEventListener('message', () => resolve(), { once: true })));
+    for (let i = 0; i < concurrency; i++) {
+        const stackPointer = exports.allocateWorkerStack();
+        const tlsPointer = exports.allocateThreadLocalState(exports.__tls_size.value, exports.__tls_align.value);
+        if (stackPointer === 0 || tlsPointer === 0) {
+            throw new Error('Failed to allocate worker stack or thread-local state.');
         }
 
-        await Promise.all(ready);
+        const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
+        worker.postMessage({ memory, stackPointer, tlsPointer });
 
-        return { memory, exports, workers };
-    } catch (error) {
-        return error instanceof Error ? error : new Error(String(error));
+        workers.push(worker);
+        ready.push(new Promise(resolve => worker.addEventListener('message', () => resolve(), { once: true })));
     }
+
+    await Promise.all(ready);
+
+    return { memory, exports, workers };
 };

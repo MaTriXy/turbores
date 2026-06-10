@@ -34,7 +34,6 @@ pub const Decoder = struct {
     slice_width: u32,
     slice_info_in_row: std.MultiArrayList(SliceInfo),
     max_slice_width: u32,
-    slice_indices: []usize,
     slice_sizes: []usize,
     slice_offsets: []usize,
     luma_scaling_matrix: [64]f32,
@@ -42,9 +41,14 @@ pub const Decoder = struct {
     log2_chroma_blocks_per_mb: u5,
     alpha_bit_depth: u32,
     bit_depth: u32,
+    color_primaries: u32,
+    color_transfer: u32,
+    color_matrix: u32,
     tasks: []worker.WorkerDecodeTask,
     running_task_count: std.atomic.Value(u32),
     wait_word: u32,
+    worker_error: std.atomic.Value(?*worker.WorkerError),
+    error_message: ?[]const u8,
 };
 
 const SliceInfo = struct {
@@ -57,8 +61,9 @@ const SlicePos = struct {
     y: u32,
 };
 
-export fn createDecoder() *Decoder {
-    const result = gpa.create(Decoder) catch unreachable;
+export fn createDecoder() ?*Decoder {
+    const result = gpa.create(Decoder) catch return null;
+
     result.* = .{
         .packet = &.{},
         .frame_data = &.{},
@@ -69,7 +74,6 @@ export fn createDecoder() *Decoder {
         .slice_width = undefined,
         .slice_info_in_row = .empty,
         .max_slice_width = undefined,
-        .slice_indices = &.{},
         .slice_sizes = &.{},
         .slice_offsets = &.{},
         .luma_scaling_matrix = undefined,
@@ -77,9 +81,14 @@ export fn createDecoder() *Decoder {
         .log2_chroma_blocks_per_mb = undefined,
         .alpha_bit_depth = undefined,
         .bit_depth = 10, // Hardcoded for now, must be passed in from the outside
+        .color_primaries = undefined,
+        .color_transfer = undefined,
+        .color_matrix = undefined,
         .tasks = &.{},
         .running_task_count = .init(0),
         .wait_word = 0,
+        .worker_error = .init(null),
+        .error_message = null,
     };
 
     return result;
@@ -121,19 +130,38 @@ export fn getAlphaBitDepth(decoder: *Decoder) u32 {
     return decoder.alpha_bit_depth;
 }
 
+export fn getColorPrimaries(decoder: *Decoder) u32 {
+    return decoder.color_primaries;
+}
+
+export fn getColorTransfer(decoder: *Decoder) u32 {
+    return decoder.color_transfer;
+}
+
+export fn getColorMatrix(decoder: *Decoder) u32 {
+    return decoder.color_matrix;
+}
+
+export fn getErrorMessagePtr(decoder: *Decoder) ?[*]const u8 {
+    return if (decoder.error_message) |msg| msg.ptr else null;
+}
+
+export fn getErrorMessageSize(decoder: *Decoder) usize {
+    return if (decoder.error_message) |msg| msg.len else 0;
+}
+
 export fn closeDecoder(decoder: *Decoder) void {
     gpa.free(decoder.packet);
     gpa.free(decoder.frame_data);
     decoder.slice_info_in_row.deinit(gpa);
-    gpa.free(decoder.slice_indices);
     gpa.free(decoder.slice_sizes);
     gpa.free(decoder.slice_offsets);
     gpa.free(decoder.tasks);
     gpa.destroy(decoder);
 }
 
-export fn allocatePacket(decoder: *Decoder, size: usize) [*]u8 {
-    decoder.packet = gpa.realloc(decoder.packet, size) catch unreachable;
+export fn allocatePacket(decoder: *Decoder, size: usize) ?[*]u8 {
+    decoder.packet = gpa.realloc(decoder.packet, size) catch return null;
     return decoder.packet.ptr;
 }
 
@@ -142,39 +170,87 @@ export fn getWaitWordAddress(decoder: *Decoder) *u32 {
 }
 
 export fn decodePacket(decoder: *Decoder) i32 {
-    decodePacketInternal(decoder) catch return -1;
-
+    decodePacketInternal(decoder) catch |err| return misc.toErrorCode(err);
     return 0;
 }
 
-fn decodePacketInternal(decoder: *Decoder) !void {
+threadlocal var error_print_buffer: [1024]u8 = undefined;
+
+inline fn decodePacketInternal(decoder: *Decoder) misc.ConvertibleError!void {
+    decoder.error_message = null;
+    decoder.worker_error.store(null, .seq_cst);
+
     var reader = misc.ByteReader.init(decoder.packet);
 
-    const frame_size = reader.takeInt(u32);
-    const frame_type_outer = reader.takeInt(u32);
+    const frame_size = try reader.takeInt(u32);
+    if (reader.data.len < frame_size) {
+        @branchHint(.unlikely);
+        decoder.error_message = "Packet is smaller than the frame size indicated in the frame header.";
+        return error.InvalidData;
+    }
 
-    const hdr_size = reader.takeInt(u16);
-    const version = reader.takeInt(u16);
-    const creator_id = reader.takeInt(u32);
-    const frame_width = reader.takeInt(u16);
-    const frame_height = reader.takeInt(u16);
-    const frame_flags = reader.takeInt(u8);
-    const chrominance_factor = frame_flags >> 6;
+    reader.data = decoder.packet[0..frame_size];
+
+    const frame_type_outer = try reader.takeInt(u32);
+    if (frame_type_outer != comptime std.mem.readInt(u32, "icpf", .big)) {
+        @branchHint(.unlikely);
+        decoder.error_message = "Invalid packet header frame type.";
+        return error.InvalidData;
+    }
+
+    const hdr_size: u32 = try reader.takeInt(u16);
+
+    const version = try reader.takeInt(u16);
+    if (version > 1) {
+        @branchHint(.unlikely);
+        decoder.error_message = "Version > 1 is not supported.";
+        return error.NotSupported;
+    }
+
+    _ = try reader.takeInt(u32); // Creator ID
+
+    const frame_width = try reader.takeInt(u16);
+    const frame_height = try reader.takeInt(u16);
+    if (frame_width > 16384 or frame_height > 16384) {
+        @branchHint(.unlikely);
+        decoder.error_message = std.fmt.bufPrint(
+            &error_print_buffer,
+            "Frame dimensions ({}x{}) exceed the maximum supported size of 16384x16384.",
+            .{ frame_width, frame_height },
+        ) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.OutOfMemory,
+        };
+
+        return error.NotSupported;
+    }
+
+    const frame_flags = try reader.takeInt(u8);
     const frame_type = (frame_flags >> 2) & 0b11;
-    reader.toss(1);
-    const primaries = reader.takeInt(u8);
-    const transfer_function = reader.takeInt(u8);
-    const color_matrix = reader.takeInt(u8);
-    const next_byte = reader.takeInt(u8);
-    const src_pix_format = next_byte >> 4;
-    const alpha_info = next_byte & 0b1111;
-    reader.toss(1);
-    const q_mat_flags = reader.takeInt(u8);
+    if (frame_type != 0) {
+        @branchHint(.unlikely);
+        decoder.error_message = "Interlaced frames are not yet supported.";
+        return error.NotSupported;
+    }
 
-    _ = .{ frame_size, frame_type_outer, hdr_size, version, creator_id, frame_width, frame_height, frame_flags, chrominance_factor, frame_type, primaries, transfer_function, color_matrix, next_byte, src_pix_format, alpha_info, q_mat_flags };
+    reader.toss(1); // Reserved
+    decoder.color_primaries = try reader.takeInt(u8);
+    decoder.color_transfer = try reader.takeInt(u8);
+    decoder.color_matrix = try reader.takeInt(u8);
+
+    const next_byte = try reader.takeInt(u8);
+    _ = next_byte >> 4; // Source pixel format
+    const alpha_info = next_byte & 0b1111;
+    if (alpha_info > 2) {
+        @branchHint(.unlikely);
+        decoder.error_message = "Invalid alpha info header field.";
+        return error.InvalidData;
+    }
+
+    reader.toss(1);
+    const q_mat_flags = try reader.takeInt(u8);
 
     const q_mat_luma: [64]u8 = if (q_mat_flags & 0b10 != 0)
-        reader.takeArray(64).*
+        (try reader.takeArray(64)).*
     else
         @splat(4);
 
@@ -189,9 +265,9 @@ fn decodePacketInternal(decoder: *Decoder) !void {
     }
 
     const q_mat_chroma: [64]u8 = if (q_mat_flags & 0b01 != 0)
-        reader.takeArray(64).*
+        (try reader.takeArray(64)).*
     else
-        @splat(4);
+        q_mat_luma; // When no chroma matrix is sent, the luma matrix is reused for chroma
 
     inline for (0..8) |x| {
         inline for (0..8) |y| {
@@ -202,8 +278,8 @@ fn decodePacketInternal(decoder: *Decoder) !void {
         }
     }
 
-    std.debug.assert(chrominance_factor == 2 or chrominance_factor == 3);
-    decoder.log2_chroma_blocks_per_mb = if (chrominance_factor == 2) 1 else 2;
+    const chrominance_flag = (frame_flags >> 6) & 1;
+    decoder.log2_chroma_blocks_per_mb = @intCast(chrominance_flag + 1); // 0 => 422, 1 => 444
 
     decoder.alpha_bit_depth = alpha_info << 3;
 
@@ -220,18 +296,57 @@ fn decodePacketInternal(decoder: *Decoder) !void {
     const frame_data_size = multiplier * (decoder.coded_width * decoder.coded_height);
     decoder.frame_data = try gpa.realloc(decoder.frame_data, frame_data_size);
 
-    const pic_hdr_size = reader.takeInt(u8);
-    const pic_data_size = reader.takeInt(u32);
-    const total_slices = reader.takeInt(u16);
-    const slice_dimensions = reader.takeInt(u8);
+    if (8 + hdr_size < reader.pos) {
+        @branchHint(.unlikely);
+        decoder.error_message = "Frame header size too small.";
+        return error.InvalidData;
+    }
 
-    _ = pic_hdr_size;
-    _ = pic_data_size;
+    const pic_header_start_pos = 8 + hdr_size;
+    reader.pos = pic_header_start_pos;
 
-    decoder.slice_width = @as(u32, 1) << @as(u5, @intCast(slice_dimensions >> 4));
-    // Apparently all other decoders only support this value, and therefore no encoder emits anything but this value, so
-    // we can hardcode it to simplify the code.
-    //decoder.slice_height = @as(u32, 1) << @as(u5, @intCast(slice_dimensions & 0b1111));
+    const pic_hdr_size: u32 = try reader.takeInt(u8) >> 3;
+    const pic_data_size = try reader.takeInt(u32);
+
+    // Protect against overflow
+    const pic_data_end = try std.math.add(u32, pic_header_start_pos, pic_data_size);
+
+    if (reader.data.len < pic_data_end) {
+        @branchHint(.unlikely);
+        decoder.error_message = "Packet is smaller than the picture data size indicated in the frame header.";
+        return error.InvalidData;
+    }
+
+    reader.data = reader.data[0..pic_data_end];
+
+    const total_slices: u32 = try reader.takeInt(u16);
+    const slice_dimensions = try reader.takeInt(u8);
+
+    if (pic_header_start_pos + pic_hdr_size < reader.pos) {
+        @branchHint(.unlikely);
+        decoder.error_message = "Picture header size too small.";
+        return error.InvalidData;
+    }
+
+    reader.pos = pic_header_start_pos + pic_hdr_size;
+
+    const log2_slice_width = slice_dimensions >> 4;
+    if (log2_slice_width > 7) {
+        @branchHint(.unlikely);
+        // Slice widths are stored in a u8 down the line, so 128 (1 << 7) is the largest we can represent
+        decoder.error_message = "Slice widths larger than 128 are not supported.";
+        return error.NotSupported;
+    }
+    decoder.slice_width = @as(u32, 1) << @as(u5, @intCast(log2_slice_width));
+
+    const log2_slice_height = slice_dimensions & 0b1111;
+    if (log2_slice_height > 0) {
+        @branchHint(.unlikely);
+        // Apparently all other decoders only support this value, and therefore no encoder emits anything but this
+        // value, so we can hardcode it to simplify the code.
+        decoder.error_message = "Only slice heights of 1 are supported.";
+        return error.NotSupported;
+    }
 
     decoder.slice_info_in_row.clearRetainingCapacity();
     decoder.max_slice_width = 0;
@@ -256,15 +371,29 @@ fn decodePacketInternal(decoder: *Decoder) !void {
         }
     }
 
-    const fixed_per_slice = 100;
+    const expected_slice_count = decoder.slice_info_in_row.len * (decoder.coded_height >> 4);
+    if (total_slices != expected_slice_count) {
+        @branchHint(.unlikely);
+        decoder.error_message = std.fmt.bufPrint(
+            &error_print_buffer,
+            "Unexpected slice count: expected {}, found {}.",
+            .{ expected_slice_count, total_slices },
+        ) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.OutOfMemory,
+        };
+
+        return error.InvalidData;
+    }
+
+    const fixed_cost_per_slice = 100;
 
     var total_slice_size: usize = 0;
     decoder.slice_sizes = try gpa.realloc(decoder.slice_sizes, total_slices);
     for (0..total_slices) |i| {
-        const size: usize = reader.takeInt(u16);
+        const size: usize = try reader.takeInt(u16);
 
         decoder.slice_sizes[i] = size;
-        total_slice_size += size + fixed_per_slice;
+        total_slice_size += size;
     }
 
     decoder.slice_offsets = try gpa.realloc(decoder.slice_offsets, total_slices);
@@ -272,57 +401,67 @@ fn decodePacketInternal(decoder: *Decoder) !void {
     var current_offset: usize = reader.pos;
     for (0..total_slices) |i| {
         decoder.slice_offsets[i] = current_offset;
-        current_offset += decoder.slice_sizes[i];
+
+        // Protect against overflow
+        current_offset = try std.math.add(usize, current_offset, decoder.slice_sizes[i]);
     }
 
-    decoder.slice_indices = try gpa.realloc(decoder.slice_indices, total_slices);
-
-    for (0..total_slices) |i| {
-        decoder.slice_indices[i] = i;
-    }
-
-    if (false) {
-        const Context = struct {
-            items: []usize,
-
-            fn sort(self: @This(), a: usize, b: usize) bool {
-                return self.items[a] < self.items[b];
-            }
-        };
-        const ctx = Context{
-            .items = decoder.slice_sizes,
-        };
-
-        std.mem.sortUnstable(usize, decoder.slice_indices, ctx, Context.sort);
+    if (current_offset > reader.data.len) {
+        @branchHint(.unlikely);
+        decoder.error_message = "Slice data extends past the bounds of the picture data.";
+        return error.UnexpectedEof;
     }
 
     misc.lockMutex(&worker.worker_task_queue_mutex);
     defer worker.worker_task_queue_mutex.unlock(io);
 
-    const num_workers_val = worker.num_workers.load(.monotonic);
-
-    const size_per_worker = total_slice_size / num_workers_val;
+    const num_workers_val = worker.num_workers.load(.seq_cst);
 
     decoder.tasks = try gpa.realloc(decoder.tasks, num_workers_val);
 
     var slice_start_index: usize = 0;
+    var remaining_size = total_slice_size + total_slices * fixed_cost_per_slice;
 
+    // Distribute the slices to the workers mostly evenly based on size: larger slices (with more bytes) take longer to
+    // decode, so in an effort to make sure every worker has roughly the same amount of work to do, we distribute based
+    // on slice size.
     for (0..num_workers_val) |i| {
         const start_index = slice_start_index;
 
-        var current_size: usize = 0;
-        while (slice_start_index < total_slices) : (slice_start_index += 1) {
-            if (current_size >= size_per_worker) {
-                break;
+        if (i == num_workers_val - 1) {
+            // Last worker takes everything left
+            slice_start_index = total_slices;
+        } else {
+            const target = remaining_size / (num_workers_val - i);
+            var current_size: usize = 0;
+
+            while (slice_start_index < total_slices) {
+                const slice_size = decoder.slice_sizes[slice_start_index] + fixed_cost_per_slice;
+                const new_size = current_size + slice_size;
+
+                if (new_size > target) {
+                    // We now overshot the target. Check if we're now closer to the target than before. If yes, take one
+                    // more slice, if no, don't.
+                    if (new_size - target <= target - current_size) {
+                        current_size = new_size;
+                        slice_start_index += 1;
+                    }
+
+                    break;
+                }
+
+                current_size = new_size;
+                slice_start_index += 1;
             }
 
-            current_size += decoder.slice_sizes[decoder.slice_indices[slice_start_index]] + fixed_per_slice;
+            remaining_size -= current_size;
         }
 
         decoder.tasks[i] = .{
             .decoder = decoder,
             .slice_start = start_index,
             .slice_count = slice_start_index - start_index,
+            .error_message = null,
         };
 
         try worker.worker_task_queue.pushBack(gpa, .{
@@ -332,7 +471,24 @@ fn decodePacketInternal(decoder: *Decoder) !void {
 
     io.futexWake(u32, &worker.worker_task_queue.len, num_workers_val);
 
-    decoder.running_task_count.store(num_workers_val, .monotonic);
+    decoder.running_task_count.store(num_workers_val, .seq_cst);
+}
+
+export fn finalizePacketDecoding(decoder: *Decoder) i32 {
+    if (decoder.running_task_count.load(.seq_cst) > 0) {
+        @branchHint(.unlikely);
+        // Shouldn't be possible to get into this state; bad bad!
+        return comptime misc.toErrorCode(error.InvalidState);
+    }
+
+    const worker_error_maybe = decoder.worker_error.load(.seq_cst);
+    if (worker_error_maybe) |worker_error| {
+        @branchHint(.unlikely);
+        decoder.error_message = worker_error.message;
+        return worker_error.code;
+    }
+
+    return 0;
 }
 
 pub fn executeDecodeTask(task: *worker.WorkerDecodeTask) !void {
@@ -372,12 +528,12 @@ pub fn executeDecodeTask(task: *worker.WorkerDecodeTask) !void {
 
     var i: usize = 0;
     while (i + 1 < slice_count) : (i += 2) {
-        const index_1 = decoder.slice_indices[slice_start + i];
-        const index_2 = decoder.slice_indices[slice_start + i + 1];
+        const index_1 = slice_start + i;
+        const index_2 = slice_start + i + 1;
         reader.pos = decoder.slice_offsets[index_1];
-        const header_1 = parseSliceHeader(decoder, &reader, index_1);
+        const header_1 = try parseSliceHeader(task, &reader, index_1);
         reader.pos = decoder.slice_offsets[index_2];
-        const header_2 = parseSliceHeader(decoder, &reader, index_2);
+        const header_2 = try parseSliceHeader(task, &reader, index_2);
 
         // AC parameters are sparse, so we must memset them all to zero
         @memset(slice_data, 0);
@@ -406,13 +562,14 @@ pub fn executeDecodeTask(task: *worker.WorkerDecodeTask) !void {
         const num_chroma_blocks_2 = header_2.width_mb << decoder.log2_chroma_blocks_per_mb;
 
         // Luma for slice 1 and 2
-        parseDcAndAcPair(
+        try parseDcAndAcPair(
             header_1.luma_data,
             header_2.luma_data,
             slice_1_luma_data,
             slice_2_luma_data,
             num_luma_blocks_1,
             num_luma_blocks_2,
+            task,
         );
         transformAndStoreSliceData(
             decoder,
@@ -436,13 +593,14 @@ pub fn executeDecodeTask(task: *worker.WorkerDecodeTask) !void {
         );
 
         // U for slice 1 and 2
-        parseDcAndAcPair(
+        try parseDcAndAcPair(
             header_1.u_data,
             header_2.u_data,
             slice_1_u_data,
             slice_2_u_data,
             num_chroma_blocks_1,
             num_chroma_blocks_2,
+            task,
         );
         transformAndStoreSliceData(
             decoder,
@@ -466,13 +624,14 @@ pub fn executeDecodeTask(task: *worker.WorkerDecodeTask) !void {
         );
 
         // V for slice 1 and 2
-        parseDcAndAcPair(
+        try parseDcAndAcPair(
             header_1.v_data,
             header_2.v_data,
             slice_1_v_data,
             slice_2_v_data,
             num_chroma_blocks_1,
             num_chroma_blocks_2,
+            task,
         );
         transformAndStoreSliceData(
             decoder,
@@ -538,9 +697,9 @@ pub fn executeDecodeTask(task: *worker.WorkerDecodeTask) !void {
 
     // Odd slice count leaves one slice over; decode it on its own
     if (i < slice_count) {
-        const index = decoder.slice_indices[slice_start + i];
+        const index = slice_start + i;
         reader.pos = decoder.slice_offsets[index];
-        const header = parseSliceHeader(decoder, &reader, index);
+        const header = try parseSliceHeader(task, &reader, index);
 
         const num_luma_blocks = header.width_mb << 2;
         const num_chroma_blocks = header.width_mb << decoder.log2_chroma_blocks_per_mb;
@@ -563,7 +722,7 @@ pub fn executeDecodeTask(task: *worker.WorkerDecodeTask) !void {
         const chroma_vec = @as(@Vector(64, f32), chroma_scaling_matrix) * scale;
 
         // Luma
-        parseDcAndAcSingle(header.luma_data, luma_data, num_luma_blocks);
+        try parseDcAndAcSingle(header.luma_data, luma_data, num_luma_blocks, task);
         transformAndStoreSliceData(
             decoder,
             luma_data,
@@ -576,7 +735,7 @@ pub fn executeDecodeTask(task: *worker.WorkerDecodeTask) !void {
         );
 
         // U
-        parseDcAndAcSingle(header.u_data, u_data, num_chroma_blocks);
+        try parseDcAndAcSingle(header.u_data, u_data, num_chroma_blocks, task);
         transformAndStoreSliceData(
             decoder,
             u_data,
@@ -589,7 +748,7 @@ pub fn executeDecodeTask(task: *worker.WorkerDecodeTask) !void {
         );
 
         // V
-        parseDcAndAcSingle(header.v_data, v_data, num_chroma_blocks);
+        try parseDcAndAcSingle(header.v_data, v_data, num_chroma_blocks, task);
         transformAndStoreSliceData(
             decoder,
             v_data,
@@ -625,10 +784,6 @@ pub fn executeDecodeTask(task: *worker.WorkerDecodeTask) !void {
             }
         }
     }
-
-    if (decoder.running_task_count.fetchSub(1, .monotonic) == 1) {
-        io.futexWake(u32, &decoder.wait_word, 4);
-    }
 }
 
 const SliceHeader = struct {
@@ -642,27 +797,55 @@ const SliceHeader = struct {
     pos_y_mb: u32,
 };
 
-inline fn parseSliceHeader(decoder: *Decoder, reader: *misc.ByteReader, i: usize) SliceHeader {
-    const slice_size = decoder.slice_sizes[i];
-    const slice_hdr_size = reader.takeInt(u8) >> 3;
+inline fn parseSliceHeader(task: *worker.WorkerDecodeTask, reader: *misc.ByteReader, i: usize) !SliceHeader {
+    // We can do unchecked reads here because we have already verified that the slice data fits
 
-    var scale_factor: u32 = reader.takeInt(u8);
+    const decoder = task.decoder;
+    const start_pos = reader.pos;
+    const slice_size = decoder.slice_sizes[i];
+    const slice_hdr_size: u32 = try reader.takeInt(u8) >> 3;
+
+    var scale_factor: u32 = std.math.clamp(try reader.takeInt(u8), 1, 224);
     if (scale_factor > 128) {
         scale_factor = (scale_factor - 96) << 2;
     }
 
-    const luma_data_size = reader.takeInt(u16);
-    const u_data_size = reader.takeInt(u16);
-    const v_data_size = if (slice_hdr_size >= 8)
-        reader.takeInt(u16) // There's a special field for V data size
-    else
-        slice_size - luma_data_size - u_data_size - slice_hdr_size;
-    const alpha_data_size = slice_size - luma_data_size - u_data_size - v_data_size - slice_hdr_size;
+    const luma_data_size: u32 = try reader.takeInt(u16);
+    const u_data_size: u32 = try reader.takeInt(u16);
 
-    const luma_data = reader.take(luma_data_size);
-    const u_data = reader.take(u_data_size);
-    const v_data = reader.take(v_data_size);
-    const alpha_data = reader.take(alpha_data_size);
+    const size_until_v = slice_hdr_size + luma_data_size + u_data_size;
+    if (size_until_v > slice_size) {
+        @branchHint(.unlikely);
+        task.error_message = "Channel data planes too large to fit into slice data.";
+        return error.InvalidData;
+    }
+
+    const v_data_size: u32 = if (slice_hdr_size >= 8)
+        try reader.takeInt(u16) // There's a special field for V data size
+    else
+        slice_size - size_until_v;
+
+    const size_until_alpha = size_until_v + v_data_size;
+    if (size_until_alpha > slice_size) {
+        @branchHint(.unlikely);
+        task.error_message = "Channel data planes too large to fit into slice data.";
+        return error.InvalidData;
+    }
+
+    const alpha_data_size = slice_size - size_until_alpha; // This is 0 for non-alpha frames
+
+    if (start_pos + slice_hdr_size < reader.pos) {
+        @branchHint(.unlikely);
+        task.error_message = "Slice header size too small.";
+        return error.InvalidData;
+    }
+    reader.pos = start_pos + slice_hdr_size;
+
+    // Unchecked because bounds were verified above
+    const luma_data = reader.takeUnchecked(luma_data_size);
+    const u_data = reader.takeUnchecked(u_data_size);
+    const v_data = reader.takeUnchecked(v_data_size);
+    const alpha_data = reader.takeUnchecked(alpha_data_size);
 
     const y_index = i / decoder.slice_info_in_row.len;
     const x_index = i - y_index * decoder.slice_info_in_row.len; // No % so we don't need two int divisions
@@ -711,18 +894,36 @@ fn parseDcAndAcPair(
     slice_2_data: []f32,
     num_blocks_1: u32,
     num_blocks_2: u32,
-) void {
-    var dc_state_1 = DcState.init(data_1, slice_1_data);
-    var dc_state_2 = DcState.init(data_2, slice_2_data);
+    task: *worker.WorkerDecodeTask,
+) !void {
+    // Special logic in case the data is empty (which is handled gracefully)
+    if (data_1.len == 0 or data_2.len == 0) {
+        @branchHint(.unlikely);
+
+        if (data_1.len != 0) {
+            return parseDcAndAcSingle(data_1, slice_1_data, num_blocks_1, task);
+        } else {
+            return parseDcAndAcSingle(data_2, slice_2_data, num_blocks_2, task);
+        }
+    }
+
+    // Pre-set the error message in case DC fails
+    task.error_message = "Invalid DC code stream.";
+
+    var dc_state_1 = try DcState.init(data_1, slice_1_data);
+    var dc_state_2 = try DcState.init(data_2, slice_2_data);
 
     var j: u32 = 2;
     const min_num_blocks = @min(num_blocks_1, num_blocks_2);
     while (j < min_num_blocks) : (j += 2) {
-        dc_state_1.step(j);
-        dc_state_2.step(j);
+        try dc_state_1.step(j);
+        try dc_state_2.step(j);
     }
-    while (j < num_blocks_1) : (j += 2) dc_state_1.step(j);
-    while (j < num_blocks_2) : (j += 2) dc_state_2.step(j);
+    while (j < num_blocks_1) : (j += 2) try dc_state_1.step(j);
+    while (j < num_blocks_2) : (j += 2) try dc_state_2.step(j);
+
+    // Pre-set the error message in case AC fails
+    task.error_message = "Invalid AC code stream.";
 
     const log2_block_count_1: u5 = @intCast(std.math.log2_int(u32, num_blocks_1));
     const log2_block_count_2: u5 = @intCast(std.math.log2_int(u32, num_blocks_2));
@@ -734,6 +935,7 @@ fn parseDcAndAcPair(
         .slice_data = slice_1_data,
         .pos = block_mask_1,
         .log2_block_count = log2_block_count_1,
+        .num_coefficients = @as(u32, 64) << log2_block_count_1,
         .block_mask = block_mask_1,
     };
     var ac_state_2 = AcState{
@@ -741,26 +943,42 @@ fn parseDcAndAcPair(
         .slice_data = slice_2_data,
         .pos = block_mask_2,
         .log2_block_count = log2_block_count_2,
+        .num_coefficients = @as(u32, 64) << log2_block_count_2,
         .block_mask = block_mask_2,
     };
 
     var active_1 = true;
     var active_2 = true;
     while (active_1 and active_2) {
-        active_1 = ac_state_1.step();
-        active_2 = ac_state_2.step();
+        active_1 = try ac_state_1.step();
+        active_2 = try ac_state_2.step();
     }
-    while (active_1) active_1 = ac_state_1.step();
-    while (active_2) active_2 = ac_state_2.step();
+    while (active_1) active_1 = try ac_state_1.step();
+    while (active_2) active_2 = try ac_state_2.step();
+
+    // We got through; no error message!
+    task.error_message = null;
 }
 
-fn parseDcAndAcSingle(data: []u8, slice_data: []f32, num_blocks: u32) void {
-    var dc_state = DcState.init(data, slice_data);
+fn parseDcAndAcSingle(data: []u8, slice_data: []f32, num_blocks: u32, task: *worker.WorkerDecodeTask) !void {
+    // An empty scan carries no coefficients; the slice data is already zeroed, so there's nothing to do.
+    if (data.len == 0) {
+        @branchHint(.unlikely);
+        return;
+    }
+
+    // Pre-set the error message in case DC fails
+    task.error_message = "Invalid DC code stream.";
+
+    var dc_state = try DcState.init(data, slice_data);
 
     var j: u32 = 2;
     while (j < num_blocks) : (j += 2) {
-        dc_state.step(j);
+        try dc_state.step(j);
     }
+
+    // Pre-set the error message in case AC fails
+    task.error_message = "Invalid AC code stream.";
 
     const log2_block_count: u5 = @intCast(std.math.log2_int(u32, num_blocks));
     const block_mask = num_blocks - 1;
@@ -770,10 +988,14 @@ fn parseDcAndAcSingle(data: []u8, slice_data: []f32, num_blocks: u32) void {
         .slice_data = slice_data,
         .pos = block_mask,
         .log2_block_count = log2_block_count,
+        .num_coefficients = @as(u32, 64) << log2_block_count,
         .block_mask = block_mask,
     };
 
-    while (ac_state.step()) {}
+    while (try ac_state.step()) {}
+
+    // We got through; no error message!
+    task.error_message = null;
 }
 
 const DcState = struct {
@@ -783,7 +1005,7 @@ const DcState = struct {
     sign: i32,
     prev_dc: i32,
 
-    inline fn init(data: []u8, slice_data: []f32) DcState {
+    inline fn init(data: []u8, slice_data: []f32) !DcState {
         var s = DcState{
             .bit_reader = misc.BitReader.fromData(data),
             .slice_data = slice_data,
@@ -794,14 +1016,14 @@ const DcState = struct {
 
         s.bit_reader.maybeLoadData();
 
-        const first_code_result = parseCode(s.bit_reader.current, 0xb8);
+        const first_code_result = try parseCode(s.bit_reader.current, 0xb8);
         s.code = @intCast(first_code_result.value);
 
         const first_dc = (s.code >> 1) ^ -(s.code & 1);
         s.slice_data[0] = @floatFromInt(first_dc);
         s.prev_dc = first_dc;
 
-        const second_code_result = parseCode(
+        const second_code_result = try parseCode(
             s.bit_reader.current << @as(u6, @intCast(first_code_result.bits)),
             0x70,
         );
@@ -817,10 +1039,13 @@ const DcState = struct {
         return s;
     }
 
-    inline fn step(self: *DcState, j: usize) void {
+    inline fn step(self: *DcState, j: usize) !void {
         self.bit_reader.maybeLoadData();
 
-        const code_result_1 = parseCode(self.bit_reader.current, dc_params[@min(@as(usize, @intCast(self.code)), 6)]);
+        const code_result_1 = try parseCode(
+            self.bit_reader.current,
+            dc_params[@min(@as(usize, @intCast(self.code)), 6)],
+        );
 
         self.code = @intCast(code_result_1.value);
         self.sign = @intFromBool(self.code > 0) * (self.sign ^ -(self.code & 1));
@@ -828,8 +1053,9 @@ const DcState = struct {
         const result_1 = self.prev_dc + (((self.code + 1) >> 1) ^ self.sign) - self.sign;
         self.slice_data[j << 6] = @floatFromInt(result_1);
 
-        const code_result_2 = parseCode(
-            self.bit_reader.current << @as(u6, @intCast(code_result_1.bits)),
+        const next_current = self.bit_reader.current << @as(u6, @intCast(code_result_1.bits));
+        const code_result_2 = try parseCode(
+            next_current,
             dc_params[@min(code_result_1.value, 6)],
         );
 
@@ -849,21 +1075,30 @@ const AcState = struct {
     slice_data: []f32,
     pos: u32,
     log2_block_count: u5,
+    num_coefficients: u32,
     block_mask: u32,
     run: u32 = 4,
     level: i32 = 2,
 
-    inline fn step(self: *AcState) bool {
+    inline fn step(self: *AcState) !bool {
         self.bit_reader.maybeLoadData();
         if (self.bit_reader.current == 0) {
             return false;
         }
 
-        const run_result = parseCode(self.bit_reader.current, run_params[@min(self.run, 15)]);
+        const run_result = try parseCode(
+            self.bit_reader.current,
+            run_params[@min(self.run, 15)],
+        );
         self.run = @intCast(run_result.value);
         self.pos += self.run + 1;
 
-        const level_result = parseCode(
+        if (self.pos >= self.num_coefficients) {
+            @branchHint(.unlikely);
+            return error.InvalidData;
+        }
+
+        const level_result = try parseCode(
             self.bit_reader.current << @as(u6, @intCast(run_result.bits)),
             level_params[@min(@as(u32, @intCast(self.level)), 9)],
         );
@@ -937,6 +1172,9 @@ fn AlphaState(source_bit_depth: comptime_int, target_bit_depth: comptime_int) ty
         }
 
         inline fn step(self: *@This()) bool {
+            // No error handling in here because it can't fail; if the bitstream is too short, it will still parse
+            // properly because it's just going to parse a bunch of zeroes.
+
             self.bit_reader.maybeLoadData();
 
             var val: i64 = undefined;
@@ -1010,7 +1248,7 @@ const ParsedCode = struct {
     bits: u64,
 };
 
-inline fn parseCode(word: u64, params: u64) ParsedCode {
+inline fn parseCode(word: u64, params: u64) !ParsedCode {
     const mp: u64 = params & 0b11;
     const g: u64 = (params >> 2) & 0b111;
     const r: u64 = params >> 5;
@@ -1023,6 +1261,12 @@ inline fn parseCode(word: u64, params: u64) ParsedCode {
     const bits_big = (n << 1) +% g -% mp;
     const bits_small = n + 1 + r;
     const bits = if (is_big) bits_big else bits_small;
+
+    if (bits > 31) {
+        @branchHint(.unlikely);
+        return error.InvalidData;
+    }
+
     const sub = @as(u64, 1) << (if (is_big) @intCast(g) else @intCast(r));
     const raw = word >> @as(u6, @intCast(64 - bits));
 
@@ -1046,15 +1290,17 @@ fn transformAndStoreSliceData(
 ) void {
     std.debug.assert(log2_blocks_per_macroblock == 1 or log2_blocks_per_macroblock == 2);
 
+    const max_value = (@as(u16, 1) << @as(u4, @intCast(decoder.bit_depth))) - 1;
+
     if (log2_blocks_per_macroblock == 2) {
         const coded_width = decoder.coded_width;
 
         var j: u32 = 0;
         while (j < num_blocks) : (j += 4) {
-            const result_0 = idct_8x8(slice_data[(j << 6)..][0..64].*, scaling_matrix_vec);
-            const result_1 = idct_8x8(slice_data[(j << 6) + 64 ..][0..64].*, scaling_matrix_vec);
-            const result_2 = idct_8x8(slice_data[(j << 6) + 128 ..][0..64].*, scaling_matrix_vec);
-            const result_3 = idct_8x8(slice_data[(j << 6) + 192 ..][0..64].*, scaling_matrix_vec);
+            const result_0 = idct_8x8(slice_data[(j << 6)..][0..64].*, scaling_matrix_vec, max_value);
+            const result_1 = idct_8x8(slice_data[(j << 6) + 64 ..][0..64].*, scaling_matrix_vec, max_value);
+            const result_2 = idct_8x8(slice_data[(j << 6) + 128 ..][0..64].*, scaling_matrix_vec, max_value);
+            const result_3 = idct_8x8(slice_data[(j << 6) + 192 ..][0..64].*, scaling_matrix_vec, max_value);
 
             const mb_x = slice_pos.x + ((j >> 2) << 4);
             const mb_y = slice_pos.y;
@@ -1084,8 +1330,8 @@ fn transformAndStoreSliceData(
 
         var j: u32 = 0;
         while (j < num_blocks) : (j += 2) {
-            const result_a = idct_8x8(slice_data[(j << 6)..][0..64].*, scaling_matrix_vec);
-            const result_b = idct_8x8(slice_data[(j << 6) + 64 ..][0..64].*, scaling_matrix_vec);
+            const result_a = idct_8x8(slice_data[(j << 6)..][0..64].*, scaling_matrix_vec, max_value);
+            const result_b = idct_8x8(slice_data[(j << 6) + 64 ..][0..64].*, scaling_matrix_vec, max_value);
 
             const block_x = (slice_pos.x >> 1) + ((j >> 1) << 3);
 
@@ -1106,7 +1352,7 @@ inline fn storeBlock(frame_data: []u16, coded_width: u32, result: [64]u16, x: u3
     }
 }
 
-inline fn idct_8x8(block: [64]f32, scaling_matrix: @Vector(64, f32)) [64]u16 {
+inline fn idct_8x8(block: [64]f32, scaling_matrix: @Vector(64, f32), max_value: u16) [64]u16 {
     const Vec = @Vector(64, f32);
     var float_vec: Vec = block;
     float_vec *= scaling_matrix;
@@ -1124,7 +1370,7 @@ inline fn idct_8x8(block: [64]f32, scaling_matrix: @Vector(64, f32)) [64]u16 {
         @setRuntimeSafety(false); // Since the f32->u32 clamp is actually intended here
 
         var as_u32: @Vector(8, u32) = @intFromFloat(rows[r]);
-        as_u32 = @min(as_u32, @as(@Vector(8, u32), @splat(1023)));
+        as_u32 = @min(as_u32, @as(@Vector(8, u32), @splat(max_value)));
 
         result[8 * r ..][0..8].* = @as(@Vector(8, u16), @intCast(as_u32));
     }

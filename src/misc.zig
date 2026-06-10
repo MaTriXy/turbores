@@ -137,7 +137,27 @@ pub inline fn lockMutex(mutex: *std.Io.Mutex) void {
         // The browser main thread isn't allowed to block on atomics.wait, so the best we can do is a spinlock
         while (!mutex.tryLock()) {}
     } else {
-        mutex.lock(io) catch unreachable;
+        mutex.lock(io) catch unreachable; // Cancels can't happen in WASM
+    }
+}
+
+pub const ConvertibleError = error{
+    OutOfMemory,
+    UnexpectedEof,
+    InvalidData,
+    NotSupported,
+    InvalidState,
+    Overflow,
+};
+
+pub inline fn toErrorCode(err: ConvertibleError) i32 {
+    switch (err) {
+        error.OutOfMemory => return -1,
+        error.UnexpectedEof => return -2,
+        error.InvalidData => return -3,
+        error.NotSupported => return -4,
+        error.InvalidState => return -5,
+        error.Overflow => return -6,
     }
 }
 
@@ -152,7 +172,21 @@ pub const ByteReader = struct {
         };
     }
 
-    pub inline fn takeInt(self: *ByteReader, comptime T: type) T {
+    pub inline fn takeInt(self: *ByteReader, comptime T: type) !T {
+        const size = @divExact(@typeInfo(T).int.bits, 8);
+
+        if (size > self.remaining()) {
+            return error.UnexpectedEof;
+        }
+
+        return self.takeIntUnchecked(T);
+    }
+
+    pub inline fn takeIntUnchecked(self: *ByteReader, comptime T: type) T {
+        const size = @divExact(@typeInfo(T).int.bits, 8);
+
+        std.debug.assert(size <= self.remaining());
+
         if (T == u8) {
             const value = self.data[self.pos];
             self.pos += 1;
@@ -160,20 +194,33 @@ pub const ByteReader = struct {
             return value;
         }
 
-        const size = @divExact(@typeInfo(T).int.bits, 8);
         const value = std.mem.readInt(T, self.data[self.pos..][0..size], .big);
         self.pos += size;
 
         return value;
     }
 
-    pub inline fn takeArray(self: *ByteReader, comptime n: usize) *[n]u8 {
+    pub inline fn takeArray(self: *ByteReader, comptime n: usize) !*[n]u8 {
+        if (n > self.remaining()) {
+            return error.UnexpectedEof;
+        }
+
         const arr = self.data[self.pos..][0..n];
         self.pos += n;
         return arr;
     }
 
-    pub inline fn take(self: *ByteReader, n: usize) []u8 {
+    pub inline fn take(self: *ByteReader, n: usize) ![]u8 {
+        if (n > self.remaining()) {
+            return error.UnexpectedEof;
+        }
+
+        return self.takeUnchecked(n);
+    }
+
+    pub inline fn takeUnchecked(self: *ByteReader, n: usize) []u8 {
+        std.debug.assert(n <= self.remaining());
+
         const slice = self.data[self.pos..][0..n];
         self.pos += n;
         return slice;
@@ -225,7 +272,7 @@ pub const BitReader = struct {
                 },
                 inline 1...7 => |remaining_captured| {
                     const int_type = @Int(.unsigned, remaining_captured << 3);
-                    next_word = self.reader.takeInt(int_type);
+                    next_word = self.reader.takeIntUnchecked(int_type);
                     next_word <<= (8 - remaining_captured) << 3;
                 },
                 else => unreachable,
@@ -240,7 +287,7 @@ pub const BitReader = struct {
 
             self.bit_health = comptime std.math.maxInt(u64); // So that the load never runs again
         } else {
-            const next_word: u64 = self.reader.takeInt(u64);
+            const next_word: u64 = self.reader.takeIntUnchecked(u64);
 
             self.current |= next_word >> @as(u6, @intCast(self.bit_health));
 

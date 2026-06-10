@@ -15,4 +15,6 @@ self.addEventListener('message', async (event) => {
 
     self.postMessage(null);
     exports.startWorker();
+
+    throw new Error("Unexpected worker termination.");
 });
