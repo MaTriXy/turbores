@@ -1329,10 +1329,26 @@ fn transformAndStoreSliceData(
 
         var j: u32 = 0;
         while (j < num_blocks) : (j += 4) {
-            const result_0 = idct_8x8(slice_data[(j << 6)..][0..64].*, scaling_matrix_vec, max_value);
-            const result_1 = idct_8x8(slice_data[(j << 6) + 64 ..][0..64].*, scaling_matrix_vec, max_value);
-            const result_2 = idct_8x8(slice_data[(j << 6) + 128 ..][0..64].*, scaling_matrix_vec, max_value);
-            const result_3 = idct_8x8(slice_data[(j << 6) + 192 ..][0..64].*, scaling_matrix_vec, max_value);
+            const result_0 = idct_8x8(
+                slice_data[(j << 6)..][0..64].*,
+                scaling_matrix_vec,
+                max_value,
+            );
+            const result_1 = idct_8x8(
+                slice_data[(j << 6) + 64 ..][0..64].*,
+                scaling_matrix_vec,
+                max_value,
+            );
+            const result_2 = idct_8x8(
+                slice_data[(j << 6) + 128 ..][0..64].*,
+                scaling_matrix_vec,
+                max_value,
+            );
+            const result_3 = idct_8x8(
+                slice_data[(j << 6) + 192 ..][0..64].*,
+                scaling_matrix_vec,
+                max_value,
+            );
 
             const mb_x = slice_pos.x + ((j >> 2) << 4);
             const mb_y = slice_pos.y;
@@ -1362,8 +1378,16 @@ fn transformAndStoreSliceData(
 
         var j: u32 = 0;
         while (j < num_blocks) : (j += 2) {
-            const result_a = idct_8x8(slice_data[(j << 6)..][0..64].*, scaling_matrix_vec, max_value);
-            const result_b = idct_8x8(slice_data[(j << 6) + 64 ..][0..64].*, scaling_matrix_vec, max_value);
+            const result_a = idct_8x8(
+                slice_data[(j << 6)..][0..64].*,
+                scaling_matrix_vec,
+                max_value,
+            );
+            const result_b = idct_8x8(
+                slice_data[(j << 6) + 64 ..][0..64].*,
+                scaling_matrix_vec,
+                max_value,
+            );
 
             const block_x = (slice_pos.x >> 1) + ((j >> 1) << 3);
 
