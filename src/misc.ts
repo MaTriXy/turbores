@@ -36,3 +36,33 @@ export const decodeUtf8 = (bytes: Uint8Array) => {
 
     return s;
 };
+
+export class AsyncMutex {
+	currentPromise = Promise.resolve();
+	pending = 0;
+
+	async acquire() {
+		let resolver: () => void;
+		const nextPromise = new Promise<void>((resolve) => {
+			let resolved = false;
+
+			resolver = () => {
+				if (resolved) {
+					return;
+				}
+
+				resolve();
+				this.pending--;
+				resolved = true;
+			};
+		});
+
+		const currentPromiseAlias = this.currentPromise;
+		this.currentPromise = nextPromise;
+		this.pending++;
+
+		await currentPromiseAlias;
+
+		return resolver!;
+	}
+}

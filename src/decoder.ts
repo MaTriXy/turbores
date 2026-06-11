@@ -1,5 +1,5 @@
 import { createErrorFromCodeAndMessage, DecoderClosedError, InvalidDataError, InvalidStateError, NotSupportedError, OutOfMemoryError, UnexpectedEofError } from './errors';
-import { decodeUtf8 } from './misc';
+import { assert, decodeUtf8 } from './misc';
 import { canUseSharedMemory, ensureWorkers, getConcurrency, getRuntime, type Runtime } from './runtime';
 import type { WasmExports } from './wasm';
 import type { WorkerMessage, WorkerReply } from './worker';
@@ -56,8 +56,8 @@ export abstract class Decoder implements Disposable, AsyncDisposable {
 
     close() {
         if (this._closed) {
-            // Idempotent: just resolve once whatever is already queued (including the original close) drains.
-            return this.queue.then(() => {});
+            // Idempotent, just resolve when the queue is done
+            return this.queue as Promise<void>;
         }
         this._closed = true;
 
@@ -93,7 +93,7 @@ const sharedDecoderRegistry = new FinalizationRegistry<{ runtime: Runtime; ptr: 
 
 // Used when proper shared memory is available
 class SharedDecoder extends Decoder {
-    private runtime: Runtime;
+    private runtime: Runtime | null;
     private ptr: number;
     private waitWordAddress: number;
     // 0 means decodePacket runs synchronously in the main thread
@@ -110,11 +110,16 @@ class SharedDecoder extends Decoder {
     }
 
     protected runClose() {
+        assert(this.runtime)
+
         sharedDecoderRegistry.unregister(this);
         this.runtime.exports.closeDecoder(this.ptr);
+
+        this.runtime = null; // Allow it to get GCd if necessary
     }
 
     protected async runDecode(packetData: Uint8Array) {
+        assert(this.runtime);
         const { exports, memory } = this.runtime;
 
         const packetPtr = exports.allocatePacket(this.ptr, packetData.byteLength);
@@ -142,6 +147,7 @@ class SharedDecoder extends Decoder {
     }
 
     private createError(code: number) {
+        assert(this.runtime);
         const { exports, memory } = this.runtime;
 
         let errorMessage: string | undefined = undefined;

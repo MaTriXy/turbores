@@ -1,3 +1,4 @@
+import { AsyncMutex } from './misc';
 import { initWasmModule, type WasmExports } from './wasm';
 
 export type Runtime = {
@@ -5,6 +6,12 @@ export type Runtime = {
     exports: WasmExports;
     workers: Worker[];
 }
+
+const runtimeFinalizationRegistry = new FinalizationRegistry((workers: Worker[]) => {
+    for (const worker of workers) {
+        worker.terminate();
+    }
+});
 
 export const canUseSharedMemory = typeof SharedArrayBuffer !== 'undefined';
 
@@ -18,10 +25,30 @@ export const getConcurrency = async (): Promise<number> => {
     return os.availableParallelism?.() ?? os.cpus().length;
 };
 
-let runtimePromise: Promise<Runtime> | null = null;
-export const getRuntime = () => runtimePromise ??= initRuntime();
+let runtimeRef: WeakRef<Runtime> | null = null;
+const getRuntimeMutex = new AsyncMutex();
 
-const initRuntime = async (): Promise<Runtime> => {
+export const getRuntime = async () => {
+    const release = await getRuntimeMutex.acquire();
+
+    try {
+        if (runtimeRef) {
+            const runtime = runtimeRef.deref();
+            if (runtime) {
+                return runtime;
+            }
+        }
+    
+        const runtime = await initRuntime();
+        runtimeRef = new WeakRef(runtime);
+    
+        return runtime;
+    } finally {
+        release();
+    }
+};
+
+const initRuntime = async () => {
     const memory = new WebAssembly.Memory({ initial: 32, maximum: 65536, shared: true });
     const exports = await initWasmModule(memory);
 
@@ -37,7 +64,10 @@ const initRuntime = async (): Promise<Runtime> => {
         self === window;
     exports.setIsBrowserMainThread(Number(isBrowserMainThread));
 
-    return { memory, exports, workers: [] };
+    const result: Runtime = { memory, exports, workers: [] };
+    runtimeFinalizationRegistry.register(result, result.workers);
+
+    return result;
 };
 
 export const ensureWorkers = (runtime: Runtime, count: number) => {
