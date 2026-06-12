@@ -17,6 +17,7 @@ import {
     UnexpectedEofError,
 } from './errors';
 import { Frame, readFrameContents, type FilledFrame } from './frame';
+import { MessageType, type WorkerMessage, type WorkerReply } from './messages';
 import { assert, canUseSharedMemory, decodeUtf8 } from './misc';
 import {
     getConcurrency,
@@ -25,7 +26,6 @@ import {
     type SharedMemoryRuntime,
     type MessagePassingRuntime,
 } from './runtime';
-import { MessageType, type WorkerMessage, type WorkerReply } from './worker';
 
 /** Per-packet decode options. */
 export type DecodeOptions = {
@@ -178,7 +178,7 @@ export abstract class Decoder implements Disposable, AsyncDisposable {
      *
      * Decoded frames will always be emitted in the same order in which their packets were queued for decoding.
      */
-    decode(packetData: Uint8Array, frame: Frame, options: DecodeOptions = {}) {
+    async decode(packetData: Uint8Array, frame: Frame, options: DecodeOptions = {}) {
         if (!(packetData instanceof Uint8Array)) {
             throw new TypeError('packetData must be a Uint8Array.');
         }

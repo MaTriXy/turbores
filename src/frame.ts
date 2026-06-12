@@ -32,6 +32,8 @@ const frameRegistry = new FinalizationRegistry<{ runtime: SharedMemoryRuntime; p
  * A container for a decoded video frame. Pass a `Frame` to `Decoder.decode` to have it populated with the decoded
  * result. Reusing frames as much as possible minimizes memory usage because less frame buffers need to be allocated.
  *
+ * Make sure to call `.clear()` on the frame when you're fully done using it.
+ *
  * A `Frame` that is currently involved in a decoding task is considered _locked_ and using or closing it is an error.
  */
 export class Frame implements Disposable {
@@ -146,7 +148,7 @@ export class Frame implements Disposable {
     /** @internal */
     _locked = false;
 
-    /** Whether this frame is locked by an in-flight decoding operation. While locked, it cannot be used or closed. */
+    /** Whether this frame is locked by an in-flight decoding operation. While locked, it cannot be used or cleared. */
     get isLocked() {
         return this._locked;
     }
@@ -170,8 +172,14 @@ export class Frame implements Disposable {
         return this.isFilled ? this as FilledFrame : null;
     }
 
-    /** Closes this frame and releases all internal resources. Throws if the frame is locked. */
-    close() {
+    /**
+     * Clears this frame, resetting all of its fields and releasing all internal resources. The frame can still be
+     * used again afterwards. Throws if the frame is locked.
+     *
+     * You *should always* call this method when you're done using a `Frame`. Not doing so may unnecessary bloat the
+     * WASM memory and may even lead to out-of-memory errors.
+     */
+    clear() {
         if (this._locked) {
             throw new FrameLockedError();
         }
@@ -190,9 +198,9 @@ export class Frame implements Disposable {
         this._reset();
     }
 
-    /** Calls `.close()` internally. */
+    /** Calls `.clear()` internally. */
     [Symbol.dispose]() {
-        this.close();
+        this.clear();
     }
 
     /** @internal */

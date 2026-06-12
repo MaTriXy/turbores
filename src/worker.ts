@@ -7,60 +7,10 @@
  */
 
 import { ErrorCode } from './errors';
-import { readFrameContents, type FrameContents } from './frame';
+import { readFrameContents } from './frame';
+import { MessageType, type WorkerMessage, type WorkerReply } from './messages';
 import { assert, decodeUtf8 } from './misc';
 import { initWasmModule, type WasmExports } from './wasm';
-
-export enum MessageType {
-    SharedMemoryInit,
-    MessagePassingInit,
-    Decode,
-    Ready,
-    InitOutOfMemoryError,
-    Decoded,
-    DecodeError,
-}
-
-// Message sent to the worker
-export type WorkerMessage =
-    | {
-        type: MessageType.SharedMemoryInit;
-        wasmBinary: Uint8Array<ArrayBuffer>;
-        memory: WebAssembly.Memory;
-        stackPointer: number;
-        tlsPointer: number;
-    }
-    | {
-        type: MessageType.MessagePassingInit;
-        wasmBinary: Uint8Array<ArrayBuffer>;
-    }
-    | {
-        type: MessageType.Decode;
-        id: number;
-        packet: Uint8Array;
-        frameBuffer: ArrayBuffer | null;
-    };
-
-// Message sent from the worker
-export type WorkerReply =
-    | {
-        type: MessageType.Ready;
-    }
-    | {
-        type: MessageType.InitOutOfMemoryError;
-        message: string;
-    }
-    | {
-        type: MessageType.Decoded;
-        id: number;
-        contents: FrameContents;
-    }
-    | {
-        type: MessageType.DecodeError;
-        id: number;
-        code: number;
-        message?: string;
-    };
 
 let messagePassingState: {
     exports: WasmExports;
