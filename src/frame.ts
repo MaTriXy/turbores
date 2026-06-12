@@ -195,6 +195,7 @@ export class Frame implements Disposable {
         this.close();
     }
 
+    /** @internal */
     _ensureWasmFrame(runtime: SharedMemoryRuntime) {
         if (this._runtime === runtime) {
             return true;
