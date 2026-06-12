@@ -6,7 +6,6 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-import initWasm from '../build/lib.wasm?init';
 import { decodeUtf8 } from './misc';
 
 export type WasmExports = {
@@ -23,27 +22,29 @@ export type WasmExports = {
     getWaitWordAddress: (decoder: number) => number;
     createDecoder: (concurrency: number) => number;
     closeDecoder: (decoder: number) => void;
+    createFrame: () => number;
+    closeFrame: (frame: number) => void;
     allocatePacket: (decoder: number, size: number) => number;
-    decodePacket: (decoder: number) => number;
+    decodePacket: (decoder: number, frame: number) => number;
     finalizePacketDecoding: (decoder: number) => number;
-    getDisplayWidth: (decoder: number) => number;
-    getDisplayHeight: (decoder: number) => number;
-    getCodedWidth: (decoder: number) => number;
-    getCodedHeight: (decoder: number) => number;
-    getFrameDataPtr: (decoder: number) => number;
-    getFrameDataSize: (decoder: number) => number;
-    getChromaSubsampling: (decoder: number) => number;
-    getBitDepth: (decoder: number) => number;
-    getAlphaBitDepth: (decoder: number) => number;
-    getColorPrimaries: (decoder: number) => number;
-    getColorTransfer: (decoder: number) => number;
-    getColorMatrix: (decoder: number) => number;
+    getDisplayWidth: (frame: number) => number;
+    getDisplayHeight: (frame: number) => number;
+    getCodedWidth: (frame: number) => number;
+    getCodedHeight: (frame: number) => number;
+    getFrameDataPtr: (frame: number) => number;
+    getFrameDataSize: (frame: number) => number;
+    getChromaSubsampling: (frame: number) => number;
+    getBitDepth: (frame: number) => number;
+    getAlphaBitDepth: (frame: number) => number;
+    getColorPrimaries: (frame: number) => number;
+    getColorTransfer: (frame: number) => number;
+    getColorMatrix: (frame: number) => number;
     getErrorMessagePtr: (decoder: number) => number;
     getErrorMessageSize: (decoder: number) => number;
 };
 
-export const initWasmModule = async (memory: WebAssembly.Memory) => {
-    const instance = await initWasm({
+export const initWasmModule = async (wasmBinary: Uint8Array<ArrayBuffer>, memory: WebAssembly.Memory) => {
+    const { instance } = await WebAssembly.instantiate(wasmBinary, {
         env: {
             memory,
             externPrint: (offset: number, length: number) => {
@@ -53,5 +54,5 @@ export const initWasmModule = async (memory: WebAssembly.Memory) => {
         },
     });
 
-    return instance.exports as unknown as WasmExports;
+    return instance.exports as WasmExports;
 };

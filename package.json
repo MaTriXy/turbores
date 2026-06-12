@@ -1,8 +1,21 @@
 {
   "name": "prores-decoder",
-  "module": "index.ts",
   "type": "module",
-  "private": true,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    "import": "./dist/index.js",
+    "types": "./dist/index.d.ts"
+  },
+  "files": [
+    "README.md",
+    "package.json",
+    "LICENSE",
+    "dist"
+  ],
+  "license": "MPL-2.0",
+  "sideEffects": false,
   "scripts": {
     "build": "./scripts/build.sh",
     "check": "tsc --noEmit && tsc --noEmit -p src",
@@ -15,12 +28,7 @@
     "@types/node": "^25.9.2",
     "eslint": "^9.22.0",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.48.0"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
-  },
-  "dependencies": {
+    "typescript-eslint": "^8.48.0",
     "mediabunny": "^1.25.8",
     "tsx": "^4.22.4",
     "vite": "^7.2.7"

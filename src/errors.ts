@@ -64,6 +64,14 @@ export class DecoderClosedError extends Error {
     }
 }
 
+/** An error caused by attempting to use a frame that is locked by an in-flight decoding operation. */
+export class FrameLockedError extends Error {
+    constructor(message = 'The frame is locked by an in-flight decoding operation.') {
+        super(message);
+        this.name = 'FrameLockedError';
+    }
+}
+
 export const createErrorFromCodeAndMessage = (code: number, message?: string) => {
     switch (code) {
         case ErrorCode.OutOfMemory: return new OutOfMemoryError(message);

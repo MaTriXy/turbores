@@ -79,3 +79,5 @@ export class AsyncMutex {
         return resolver!;
     }
 }
+
+export const canUseSharedMemory = typeof SharedArrayBuffer !== 'undefined';

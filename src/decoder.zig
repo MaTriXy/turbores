@@ -32,11 +32,6 @@ const A = [_]f32{
 
 pub const Decoder = struct {
     packet: []u8,
-    frame_data: []align(16) u16,
-    coded_width: u32,
-    coded_height: u32,
-    display_width: u32,
-    display_height: u32,
     slice_width: u32,
     slice_info_in_row: std.MultiArrayList(SliceInfo),
     max_slice_width: u32,
@@ -44,18 +39,27 @@ pub const Decoder = struct {
     slice_offsets: []usize,
     luma_scaling_matrix: [64]f32,
     chroma_scaling_matrix: [64]f32,
-    log2_chroma_blocks_per_mb: u5,
-    alpha_bit_depth: u32,
     bit_depth: u32,
-    color_primaries: u32,
-    color_transfer: u32,
-    color_matrix: u32,
     concurrency: u32,
     tasks: []DecodeTask,
     running_task_count: std.atomic.Value(u32),
     wait_word: u32,
     worker_error: std.atomic.Value(?*worker.WorkerError),
     error_message: ?[]const u8,
+};
+
+pub const Frame = struct {
+    frame_data: []align(16) u16,
+    coded_width: u32,
+    coded_height: u32,
+    display_width: u32,
+    display_height: u32,
+    log2_chroma_blocks_per_mb: u5,
+    alpha_bit_depth: u32,
+    bit_depth: u32,
+    color_primaries: u32,
+    color_transfer: u32,
+    color_matrix: u32,
 };
 
 const SliceInfo = struct {
@@ -70,6 +74,7 @@ const SlicePos = struct {
 
 pub const DecodeTask = struct {
     decoder: *Decoder,
+    frame: *Frame,
     slice_start: usize,
     slice_count: usize,
     error_message: ?[]const u8,
@@ -80,11 +85,6 @@ export fn createDecoder(concurrency: u32) ?*Decoder {
 
     result.* = .{
         .packet = &.{},
-        .frame_data = &.{},
-        .coded_width = undefined,
-        .coded_height = undefined,
-        .display_width = undefined,
-        .display_height = undefined,
         .slice_width = undefined,
         .slice_info_in_row = .empty,
         .max_slice_width = undefined,
@@ -92,12 +92,7 @@ export fn createDecoder(concurrency: u32) ?*Decoder {
         .slice_offsets = &.{},
         .luma_scaling_matrix = undefined,
         .chroma_scaling_matrix = undefined,
-        .log2_chroma_blocks_per_mb = undefined,
-        .alpha_bit_depth = undefined,
         .bit_depth = 10, // Hardcoded for now, must be passed in from the outside
-        .color_primaries = undefined,
-        .color_transfer = undefined,
-        .color_matrix = undefined,
         .concurrency = concurrency,
         .tasks = &.{},
         .running_task_count = .init(0),
@@ -109,52 +104,77 @@ export fn createDecoder(concurrency: u32) ?*Decoder {
     return result;
 }
 
-export fn getDisplayWidth(decoder: *Decoder) u32 {
-    return decoder.display_width;
+export fn createFrame() ?*Frame {
+    const result = gpa.create(Frame) catch return null;
+
+    result.* = .{
+        .frame_data = &.{},
+        .coded_width = undefined,
+        .coded_height = undefined,
+        .display_width = undefined,
+        .display_height = undefined,
+        .log2_chroma_blocks_per_mb = undefined,
+        .alpha_bit_depth = undefined,
+        .bit_depth = undefined,
+        .color_primaries = undefined,
+        .color_transfer = undefined,
+        .color_matrix = undefined,
+    };
+
+    return result;
 }
 
-export fn getDisplayHeight(decoder: *Decoder) u32 {
-    return decoder.display_height;
+export fn closeFrame(frame: *Frame) void {
+    gpa.free(frame.frame_data);
+    gpa.destroy(frame);
 }
 
-export fn getCodedWidth(decoder: *Decoder) u32 {
-    return decoder.coded_width;
+export fn getDisplayWidth(frame: *Frame) u32 {
+    return frame.display_width;
 }
 
-export fn getCodedHeight(decoder: *Decoder) u32 {
-    return decoder.coded_height;
+export fn getDisplayHeight(frame: *Frame) u32 {
+    return frame.display_height;
 }
 
-export fn getFrameDataPtr(decoder: *Decoder) [*]u16 {
-    return decoder.frame_data.ptr;
+export fn getCodedWidth(frame: *Frame) u32 {
+    return frame.coded_width;
 }
 
-export fn getFrameDataSize(decoder: *Decoder) usize {
-    return decoder.frame_data.len;
+export fn getCodedHeight(frame: *Frame) u32 {
+    return frame.coded_height;
 }
 
-export fn getChromaSubsampling(decoder: *Decoder) u32 {
-    return if (decoder.log2_chroma_blocks_per_mb == 2) 444 else 422;
+export fn getFrameDataPtr(frame: *Frame) [*]u16 {
+    return frame.frame_data.ptr;
 }
 
-export fn getBitDepth(decoder: *Decoder) u32 {
-    return decoder.bit_depth;
+export fn getFrameDataSize(frame: *Frame) usize {
+    return frame.frame_data.len;
 }
 
-export fn getAlphaBitDepth(decoder: *Decoder) u32 {
-    return decoder.alpha_bit_depth;
+export fn getChromaSubsampling(frame: *Frame) u32 {
+    return if (frame.log2_chroma_blocks_per_mb == 2) 444 else 422;
 }
 
-export fn getColorPrimaries(decoder: *Decoder) u32 {
-    return decoder.color_primaries;
+export fn getBitDepth(frame: *Frame) u32 {
+    return frame.bit_depth;
 }
 
-export fn getColorTransfer(decoder: *Decoder) u32 {
-    return decoder.color_transfer;
+export fn getAlphaBitDepth(frame: *Frame) u32 {
+    return frame.alpha_bit_depth;
 }
 
-export fn getColorMatrix(decoder: *Decoder) u32 {
-    return decoder.color_matrix;
+export fn getColorPrimaries(frame: *Frame) u32 {
+    return frame.color_primaries;
+}
+
+export fn getColorTransfer(frame: *Frame) u32 {
+    return frame.color_transfer;
+}
+
+export fn getColorMatrix(frame: *Frame) u32 {
+    return frame.color_matrix;
 }
 
 export fn getErrorMessagePtr(decoder: *Decoder) ?[*]const u8 {
@@ -167,7 +187,6 @@ export fn getErrorMessageSize(decoder: *Decoder) usize {
 
 export fn closeDecoder(decoder: *Decoder) void {
     gpa.free(decoder.packet);
-    gpa.free(decoder.frame_data);
     decoder.slice_info_in_row.deinit(gpa);
     gpa.free(decoder.slice_sizes);
     gpa.free(decoder.slice_offsets);
@@ -184,14 +203,14 @@ export fn getWaitWordAddress(decoder: *Decoder) *u32 {
     return &decoder.wait_word;
 }
 
-export fn decodePacket(decoder: *Decoder) i32 {
-    decodePacketInternal(decoder) catch |err| return misc.toErrorCode(err);
+export fn decodePacket(decoder: *Decoder, frame: *Frame) i32 {
+    decodePacketInternal(decoder, frame) catch |err| return misc.toErrorCode(err);
     return 0;
 }
 
 threadlocal var error_print_buffer: [1024]u8 = undefined;
 
-inline fn decodePacketInternal(decoder: *Decoder) misc.ConvertibleError!void {
+inline fn decodePacketInternal(decoder: *Decoder, frame: *Frame) misc.ConvertibleError!void {
     decoder.error_message = null;
     decoder.worker_error.store(null, .seq_cst);
 
@@ -248,9 +267,9 @@ inline fn decodePacketInternal(decoder: *Decoder) misc.ConvertibleError!void {
     }
 
     reader.toss(1); // Reserved
-    decoder.color_primaries = try reader.takeInt(u8);
-    decoder.color_transfer = try reader.takeInt(u8);
-    decoder.color_matrix = try reader.takeInt(u8);
+    frame.color_primaries = try reader.takeInt(u8);
+    frame.color_transfer = try reader.takeInt(u8);
+    frame.color_matrix = try reader.takeInt(u8);
 
     const next_byte = try reader.takeInt(u8);
     _ = next_byte >> 4; // Source pixel format
@@ -294,22 +313,23 @@ inline fn decodePacketInternal(decoder: *Decoder) misc.ConvertibleError!void {
     }
 
     const chrominance_flag = (frame_flags >> 6) & 1;
-    decoder.log2_chroma_blocks_per_mb = @intCast(chrominance_flag + 1); // 0 => 422, 1 => 444
+    frame.log2_chroma_blocks_per_mb = @intCast(chrominance_flag + 1); // 0 => 422, 1 => 444
 
-    decoder.alpha_bit_depth = alpha_info << 3;
+    frame.alpha_bit_depth = alpha_info << 3;
+    frame.bit_depth = decoder.bit_depth;
 
-    decoder.display_width = frame_width;
-    decoder.display_height = frame_height;
-    decoder.coded_width = (frame_width + 15) & ~@as(u32, 15);
-    decoder.coded_height = (frame_height + 15) & ~@as(u32, 15);
+    frame.display_width = frame_width;
+    frame.display_height = frame_height;
+    frame.coded_width = (frame_width + 15) & ~@as(u32, 15);
+    frame.coded_height = (frame_height + 15) & ~@as(u32, 15);
 
-    var multiplier = decoder.log2_chroma_blocks_per_mb + 1;
+    var multiplier = frame.log2_chroma_blocks_per_mb + 1;
     if (alpha_info != 0) {
         multiplier += 1;
     }
 
-    const frame_data_size = multiplier * (decoder.coded_width * decoder.coded_height);
-    decoder.frame_data = try gpa.realloc(decoder.frame_data, frame_data_size);
+    const frame_data_size = multiplier * (frame.coded_width * frame.coded_height);
+    frame.frame_data = try gpa.realloc(frame.frame_data, frame_data_size);
 
     if (8 + hdr_size < reader.pos) {
         @branchHint(.unlikely);
@@ -367,7 +387,7 @@ inline fn decodePacketInternal(decoder: *Decoder) misc.ConvertibleError!void {
     decoder.max_slice_width = 0;
 
     var current_x: u16 = 0;
-    const coded_width_in_macroblocks = decoder.coded_width >> 4;
+    const coded_width_in_macroblocks = frame.coded_width >> 4;
     while (current_x < coded_width_in_macroblocks) {
         var width: u8 = @intCast(decoder.slice_width);
         while (current_x + width > coded_width_in_macroblocks) {
@@ -386,7 +406,7 @@ inline fn decodePacketInternal(decoder: *Decoder) misc.ConvertibleError!void {
         }
     }
 
-    const expected_slice_count = decoder.slice_info_in_row.len * (decoder.coded_height >> 4);
+    const expected_slice_count = decoder.slice_info_in_row.len * (frame.coded_height >> 4);
     if (total_slices != expected_slice_count) {
         @branchHint(.unlikely);
         decoder.error_message = std.fmt.bufPrint(
@@ -433,6 +453,7 @@ inline fn decodePacketInternal(decoder: *Decoder) misc.ConvertibleError!void {
         // Synchronous, just decode right here right now
         var task = DecodeTask{
             .decoder = decoder,
+            .frame = frame,
             .slice_start = 0,
             .slice_count = total_slices,
             .error_message = null,
@@ -491,6 +512,7 @@ inline fn decodePacketInternal(decoder: *Decoder) misc.ConvertibleError!void {
 
         decoder.tasks[i] = .{
             .decoder = decoder,
+            .frame = frame,
             .slice_start = start_index,
             .slice_count = slice_start_index - start_index,
             .error_message = null,
@@ -525,13 +547,14 @@ export fn finalizePacketDecoding(decoder: *Decoder) i32 {
 
 pub fn executeDecodeTask(task: *DecodeTask) !void {
     const decoder = task.decoder;
+    const frame = task.frame;
     const slice_count = task.slice_count;
     const slice_start = task.slice_start;
 
     var reader = misc.ByteReader.init(decoder.packet);
 
     const max_num_luma_blocks = decoder.max_slice_width << 2;
-    const max_num_chroma_blocks = decoder.max_slice_width << decoder.log2_chroma_blocks_per_mb;
+    const max_num_chroma_blocks = decoder.max_slice_width << frame.log2_chroma_blocks_per_mb;
 
     const max_luma_slice_len = max_num_luma_blocks << 6;
     const max_chroma_slice_len = max_num_chroma_blocks << 6;
@@ -539,11 +562,12 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
     const luma_scaling_matrix = decoder.luma_scaling_matrix;
     const chroma_scaling_matrix = decoder.chroma_scaling_matrix;
 
-    const chroma_entries = (decoder.coded_width * decoder.coded_height) >> @as(u5, @intCast(2 - decoder.log2_chroma_blocks_per_mb));
-    const luma_frame_data = decoder.frame_data[0 .. decoder.coded_width * decoder.coded_height];
-    const u_frame_data = decoder.frame_data[decoder.coded_width * decoder.coded_height ..][0..chroma_entries];
-    const v_frame_data = decoder.frame_data[decoder.coded_width * decoder.coded_height + chroma_entries ..][0..chroma_entries];
-    const alpha_frame_data = decoder.frame_data[decoder.coded_width * decoder.coded_height + (chroma_entries << 1) ..];
+    const frame_data = frame.frame_data;
+    const chroma_entries = (frame.coded_width * frame.coded_height) >> @as(u5, @intCast(2 - frame.log2_chroma_blocks_per_mb));
+    const luma_frame_data = frame_data[0 .. frame.coded_width * frame.coded_height];
+    const u_frame_data = frame_data[frame.coded_width * frame.coded_height ..][0..chroma_entries];
+    const v_frame_data = frame_data[frame.coded_width * frame.coded_height + chroma_entries ..][0..chroma_entries];
+    const alpha_frame_data = frame_data[frame.coded_width * frame.coded_height + (chroma_entries << 1) ..];
 
     // Aligned for SIMD access
     const slice_data = try gpa.alignedAlloc(f32, .@"16", (max_luma_slice_len + (max_chroma_slice_len << 1)) << 1);
@@ -556,7 +580,7 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
     const slice_1_v_data = slice_data[(max_luma_slice_len << 1) + 2 * max_chroma_slice_len ..][0..max_chroma_slice_len];
     const slice_2_v_data = slice_data[(max_luma_slice_len << 1) + 3 * max_chroma_slice_len ..][0..max_chroma_slice_len];
 
-    const has_alpha = decoder.alpha_bit_depth != 0;
+    const has_alpha = frame.alpha_bit_depth != 0;
 
     var i: usize = 0;
     while (i + 1 < slice_count) : (i += 2) {
@@ -590,8 +614,8 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
 
         const num_luma_blocks_1 = header_1.width_mb << 2;
         const num_luma_blocks_2 = header_2.width_mb << 2;
-        const num_chroma_blocks_1 = header_1.width_mb << decoder.log2_chroma_blocks_per_mb;
-        const num_chroma_blocks_2 = header_2.width_mb << decoder.log2_chroma_blocks_per_mb;
+        const num_chroma_blocks_1 = header_1.width_mb << frame.log2_chroma_blocks_per_mb;
+        const num_chroma_blocks_2 = header_2.width_mb << frame.log2_chroma_blocks_per_mb;
 
         // Luma for slice 1 and 2
         try parseDcAndAcPair(
@@ -604,7 +628,7 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
             task,
         );
         transformAndStoreSliceData(
-            decoder,
+            task,
             slice_1_luma_data,
             luma_frame_data,
             luma_vec_1,
@@ -614,7 +638,7 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
             false,
         );
         transformAndStoreSliceData(
-            decoder,
+            task,
             slice_2_luma_data,
             luma_frame_data,
             luma_vec_2,
@@ -635,23 +659,23 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
             task,
         );
         transformAndStoreSliceData(
-            decoder,
+            task,
             slice_1_u_data,
             u_frame_data,
             chroma_vec_1,
             pos_1,
             num_chroma_blocks_1,
-            decoder.log2_chroma_blocks_per_mb,
+            frame.log2_chroma_blocks_per_mb,
             true,
         );
         transformAndStoreSliceData(
-            decoder,
+            task,
             slice_2_u_data,
             u_frame_data,
             chroma_vec_2,
             pos_2,
             num_chroma_blocks_2,
-            decoder.log2_chroma_blocks_per_mb,
+            frame.log2_chroma_blocks_per_mb,
             true,
         );
 
@@ -666,28 +690,28 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
             task,
         );
         transformAndStoreSliceData(
-            decoder,
+            task,
             slice_1_v_data,
             v_frame_data,
             chroma_vec_1,
             pos_1,
             num_chroma_blocks_1,
-            decoder.log2_chroma_blocks_per_mb,
+            frame.log2_chroma_blocks_per_mb,
             true,
         );
         transformAndStoreSliceData(
-            decoder,
+            task,
             slice_2_v_data,
             v_frame_data,
             chroma_vec_2,
             pos_2,
             num_chroma_blocks_2,
-            decoder.log2_chroma_blocks_per_mb,
+            frame.log2_chroma_blocks_per_mb,
             true,
         );
 
         if (has_alpha) {
-            switch (decoder.alpha_bit_depth) {
+            switch (frame.alpha_bit_depth) {
                 inline 8, 16 => |source_bit_depth| {
                     switch (decoder.bit_depth) {
                         inline 10, 12 => |target_bit_depth| {
@@ -702,7 +726,7 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
                                 pos_1.y,
                                 header_1.width_mb << 4,
                                 num_luma_blocks_1 << 6,
-                                decoder.coded_width,
+                                frame.coded_width,
                                 source_bit_depth,
                                 target_bit_depth,
                             );
@@ -714,7 +738,7 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
                                 pos_2.y,
                                 header_2.width_mb << 4,
                                 num_luma_blocks_2 << 6,
-                                decoder.coded_width,
+                                frame.coded_width,
                                 source_bit_depth,
                                 target_bit_depth,
                             );
@@ -734,7 +758,7 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
         const header = try parseSliceHeader(task, &reader, index);
 
         const num_luma_blocks = header.width_mb << 2;
-        const num_chroma_blocks = header.width_mb << decoder.log2_chroma_blocks_per_mb;
+        const num_chroma_blocks = header.width_mb << frame.log2_chroma_blocks_per_mb;
         const luma_slice_len = num_luma_blocks << 6;
         const chroma_slice_len = num_chroma_blocks << 6;
 
@@ -756,7 +780,7 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
         // Luma
         try parseDcAndAcSingle(header.luma_data, luma_data, num_luma_blocks, task);
         transformAndStoreSliceData(
-            decoder,
+            task,
             luma_data,
             luma_frame_data,
             luma_vec,
@@ -769,31 +793,31 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
         // U
         try parseDcAndAcSingle(header.u_data, u_data, num_chroma_blocks, task);
         transformAndStoreSliceData(
-            decoder,
+            task,
             u_data,
             u_frame_data,
             chroma_vec,
             pos,
             num_chroma_blocks,
-            decoder.log2_chroma_blocks_per_mb,
+            frame.log2_chroma_blocks_per_mb,
             true,
         );
 
         // V
         try parseDcAndAcSingle(header.v_data, v_data, num_chroma_blocks, task);
         transformAndStoreSliceData(
-            decoder,
+            task,
             v_data,
             v_frame_data,
             chroma_vec,
             pos,
             num_chroma_blocks,
-            decoder.log2_chroma_blocks_per_mb,
+            frame.log2_chroma_blocks_per_mb,
             true,
         );
 
         if (has_alpha) {
-            switch (decoder.alpha_bit_depth) {
+            switch (frame.alpha_bit_depth) {
                 inline 8, 16 => |source_bit_depth| {
                     switch (decoder.bit_depth) {
                         inline 10, 12 => |target_bit_depth| {
@@ -804,7 +828,7 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
                                 pos.y,
                                 header.width_mb << 4,
                                 num_luma_blocks << 6,
-                                decoder.coded_width,
+                                frame.coded_width,
                                 source_bit_depth,
                                 target_bit_depth,
                             );
@@ -1311,7 +1335,7 @@ inline fn parseCode(word: u64, params: u64) !ParsedCode {
 }
 
 fn transformAndStoreSliceData(
-    decoder: *Decoder,
+    task: *DecodeTask,
     slice_data: []const f32,
     frame_data: []u16,
     scaling_matrix_vec: @Vector(64, f32),
@@ -1322,10 +1346,10 @@ fn transformAndStoreSliceData(
 ) void {
     std.debug.assert(log2_blocks_per_macroblock == 1 or log2_blocks_per_macroblock == 2);
 
-    const max_value = (@as(u16, 1) << @as(u4, @intCast(decoder.bit_depth))) - 1;
+    const max_value = (@as(u16, 1) << @as(u4, @intCast(task.decoder.bit_depth))) - 1;
 
     if (log2_blocks_per_macroblock == 2) {
-        const coded_width = decoder.coded_width;
+        const coded_width = task.frame.coded_width;
 
         var j: u32 = 0;
         while (j < num_blocks) : (j += 4) {
@@ -1374,7 +1398,7 @@ fn transformAndStoreSliceData(
         }
     } else {
         std.debug.assert(is_chroma);
-        const coded_width = decoder.coded_width >> 1;
+        const coded_width = task.frame.coded_width >> 1;
 
         var j: u32 = 0;
         while (j < num_blocks) : (j += 2) {

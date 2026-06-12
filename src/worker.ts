@@ -6,24 +6,74 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-import { buildDecodeResult } from './decoder';
 import { ErrorCode } from './errors';
+import { readFrameContents, type FrameContents } from './frame';
 import { assert, decodeUtf8 } from './misc';
 import { initWasmModule, type WasmExports } from './wasm';
 
-let standaloneState: {
+export enum MessageType {
+    SharedMemoryInit,
+    MessagePassingInit,
+    Decode,
+    Ready,
+    InitOutOfMemoryError,
+    Decoded,
+    DecodeError,
+}
+
+// Message sent to the worker
+export type WorkerMessage =
+    | {
+        type: MessageType.SharedMemoryInit;
+        wasmBinary: Uint8Array<ArrayBuffer>;
+        memory: WebAssembly.Memory;
+        stackPointer: number;
+        tlsPointer: number;
+    }
+    | {
+        type: MessageType.MessagePassingInit;
+        wasmBinary: Uint8Array<ArrayBuffer>;
+    }
+    | {
+        type: MessageType.Decode;
+        id: number;
+        packet: Uint8Array;
+        frameBuffer: ArrayBuffer | null;
+    };
+
+// Message sent from the worker
+export type WorkerReply =
+    | {
+        type: MessageType.Ready;
+    }
+    | {
+        type: MessageType.InitOutOfMemoryError;
+        message: string;
+    }
+    | {
+        type: MessageType.Decoded;
+        id: number;
+        contents: FrameContents;
+    }
+    | {
+        type: MessageType.DecodeError;
+        id: number;
+        code: number;
+        message?: string;
+    };
+
+let messagePassingState: {
     exports: WasmExports;
     memory: WebAssembly.Memory;
     decoder: number;
+    // Each worker only ever allocates a single WASM Frame, which it decodes every packet into
+    frame: number;
 } | null = null;
 
-// eslint-disable-next-line @typescript-eslint/no-misused-promises
-self.addEventListener('message', async (event) => {
-    const message = event.data as WorkerMessage;
-
+const onMessage = async (message: WorkerMessage) => {
     switch (message.type) {
-        case 'shared-worker': {
-            const exports = await initWasmModule(message.memory);
+        case MessageType.SharedMemoryInit: {
+            const exports = await initWasmModule(message.wasmBinary, message.memory);
             exports.__stack_pointer.value = message.stackPointer;
             exports.__wasm_init_tls(message.tlsPointer);
             exports.setIsBrowserMainThread(Number(false));
@@ -34,14 +84,18 @@ self.addEventListener('message', async (event) => {
             throw new Error('Unexpected worker termination.');
         }
 
-        case 'standalone-init': {
+        case MessageType.MessagePassingInit: {
             // Since we only ever use one decoder, 512 MiB should be plenty
             const memory = new WebAssembly.Memory({ initial: 32, maximum: 8192, shared: true });
-            const exports = await initWasmModule(memory);
+            const exports = await initWasmModule(message.wasmBinary, memory);
 
             const tlsPointer = exports.allocateThreadLocalState(exports.__tls_size.value, exports.__tls_align.value);
             if (tlsPointer === 0) {
-                self.postMessage({ type: 'init-error', message: 'Failed to allocate thread-local state.' });
+                sendMessage({
+                    type: MessageType.InitOutOfMemoryError,
+                    message: 'Failed to allocate thread-local state.',
+                });
+
                 return;
             }
             exports.__wasm_init_tls(tlsPointer);
@@ -49,29 +103,48 @@ self.addEventListener('message', async (event) => {
 
             const decoder = exports.createDecoder(0); // Concurrent 0 = decode synchronously
             if (decoder === 0) {
-                self.postMessage({ type: 'init-error', message: 'Failed to create decoder.' });
+                sendMessage({
+                    type: MessageType.InitOutOfMemoryError,
+                    message: 'Failed to create decoder.',
+                });
+
                 return;
             }
 
-            standaloneState = { exports, memory, decoder };
-            self.postMessage({ type: 'ready' });
+            const frame = exports.createFrame();
+            if (frame === 0) {
+                sendMessage({
+                    type: MessageType.InitOutOfMemoryError,
+                    message: 'Failed to create frame.',
+                });
+
+                return;
+            }
+
+            messagePassingState = { exports, memory, decoder, frame };
+            sendMessage({ type: MessageType.Ready });
 
             return;
         }
 
-        case 'decode': {
-            assert(standaloneState);
-            const { exports, memory, decoder } = standaloneState;
-            const { id, packet } = message;
+        case MessageType.Decode: {
+            assert(messagePassingState);
+            const { exports, memory, decoder, frame } = messagePassingState;
+            const { id, packet, frameBuffer: buffer } = message;
 
             const packetPtr = exports.allocatePacket(decoder, packet.byteLength);
             if (packetPtr === 0) {
-                self.postMessage({ type: 'decode-error', id, code: ErrorCode.OutOfMemory });
+                sendMessage({
+                    type: MessageType.DecodeError,
+                    id,
+                    code: ErrorCode.OutOfMemory,
+                });
+
                 return;
             }
             new Uint8Array(memory.buffer).set(packet, packetPtr);
 
-            const code = exports.decodePacket(decoder);
+            const code = exports.decodePacket(decoder, frame);
             if (code < 0) {
                 let errorMessage: string | undefined = undefined;
                 const messagePtr = exports.getErrorMessagePtr(decoder);
@@ -80,34 +153,63 @@ self.addEventListener('message', async (event) => {
                     errorMessage = decodeUtf8(new Uint8Array(memory.buffer, messagePtr, size));
                 }
 
-                self.postMessage({ type: 'decode-error', id, code, message: errorMessage });
+                sendMessage({
+                    type: MessageType.DecodeError,
+                    id,
+                    code,
+                    message: errorMessage,
+                });
+
                 return;
             }
 
-            const result = buildDecodeResult(exports, memory, decoder);
-            result.frameData = result.frameData.slice();
+            const contents = readFrameContents(exports, memory, frame);
 
-            self.postMessage(
-                { type: 'decoded', id, result },
-                { transfer: [result.frameData.buffer] },
-            );
+            // Copy the frame data out of the WASM memory, reusing the buffer that was sent along
+            // if it has the right size. Frames of constant size therefore cause no allocations:
+            // their buffer just ping-pongs between this worker and the main thread.
+            const outBuffer = buffer && buffer.byteLength === contents.frameData.byteLength
+                ? buffer
+                : new ArrayBuffer(contents.frameData.byteLength);
+            const out = new Uint8Array(outBuffer);
+            out.set(contents.frameData);
+            contents.frameData = out;
+
+            sendMessage({
+                type: MessageType.Decoded,
+                id,
+                contents,
+            }, [outBuffer]);
 
             return;
         }
     }
-});
+};
 
-import type { DecodeResult } from './decoder';
+const sendMessage = (message: WorkerReply, transferables?: Transferable[]) => {
+    if (parentPort) {
+        parentPort.postMessage(message, transferables ?? []);
+    } else {
+        self.postMessage(message, { transfer: transferables ?? [] });
+    }
+};
 
-// Message sent to the worker
-export type WorkerMessage =
-    | { type: 'shared-worker'; memory: WebAssembly.Memory; stackPointer: number; tlsPointer: number }
-    | { type: 'standalone-init' }
-    | { type: 'decode'; id: number; packet: Uint8Array };
+// This file runs both as a web worker (browser, Deno) and as a node:worker_threads worker
+// (Node, Bun), so hook up whichever messaging API the environment provides
+let parentPort: {
+    postMessage: (data: unknown, transferables?: Transferable[]) => void;
+    on: (event: string, listener: (data: never) => void) => void;
+} | null = null;
 
-// Message sent from the worker
-export type WorkerReply =
-    | { type: 'ready' }
-    | { type: 'init-error'; message: string }
-    | { type: 'decoded'; id: number; result: DecodeResult }
-    | { type: 'decode-error'; id: number; code: number; message?: string };
+if (typeof self === 'undefined') {
+    // eslint-disable-next-line @stylistic/max-len
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-member-access
+    parentPort = require('node:worker_threads').parentPort;
+}
+
+if (parentPort) {
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises
+    parentPort.on('message', onMessage);
+} else {
+    self.addEventListener('message', event => void onMessage(event.data as WorkerMessage));
+}

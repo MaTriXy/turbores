@@ -1,14 +1,14 @@
-import { ALL_FORMATS, EncodedPacketSink, Input, UrlSource } from 'mediabunny';
-import { Decoder } from './src/index';
+import { ALL_FORMATS, EncodedPacketSink, FilePathSource, Input, UrlSource } from 'mediabunny';
+import { Decoder, Frame } from './src/index';
 
-const decoder = await Decoder.create({ useSharedMemory: false });
+const decoder = await Decoder.create({ useSharedMemory: true });
 if (decoder instanceof Error) {
     throw decoder;
 }
 
-const canvas = document.createElement('canvas');
-document.body.append(canvas);
-const ctx = canvas.getContext('2d');
+//const canvas = document.createElement('canvas');
+//document.body.append(canvas);
+//const ctx = canvas.getContext('2d');
 
 const input = new Input({
     source: new UrlSource('./IMG_0159-prores-hdr.MOV'),
@@ -28,23 +28,25 @@ let total = 0;
 
 const fileIters = 200;
 
+const frame = new Frame();
+
 for (let i = 0; i < fileIters; i++) {
     for (const packetData of packetDatas) {
-        const result = await decoder.decode(packetData);
+        const result = await decoder.decode(packetData, frame);
         if (result instanceof Error) {
             throw result;
         }
 
         //console.log(result)
-    
+
         total++;
-    
+
         break;
 
         canvas.width = result.displayWidth;
         canvas.height = result.displayHeight;
 
-        const frame = new VideoFrame(result.frameData, {
+        const videoFrame = new VideoFrame(result.frameData, {
             format: result.pixelFormat,
             codedWidth: result.codedWidth,
             codedHeight: result.codedHeight,
@@ -53,12 +55,12 @@ for (let i = 0; i < fileIters; i++) {
             timestamp: 0,
             duration: 0,
         });
-        ctx!.drawImage(frame, 0, 0);
-        frame.close();
+        ctx!.drawImage(videoFrame, 0, 0);
+        videoFrame.close();
 
         //break;
     }
 }
 
-console.log(packetDatas.length);
+console.log(packetDatas.length, (performance.now() - start) / total);
 alert((performance.now() - start) / total);

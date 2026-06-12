@@ -8,11 +8,14 @@
 
 export {
     Decoder,
-    type DecodeResult,
-    type PixelFormat,
     type DecoderOptions,
     type DecodeOptions,
 } from './decoder';
+export {
+    Frame,
+    type FilledFrame,
+    type PixelFormat,
+} from './frame';
 export {
     OutOfMemoryError,
     UnexpectedEofError,
@@ -20,4 +23,5 @@ export {
     NotSupportedError,
     InvalidStateError,
     DecoderClosedError,
+    FrameLockedError,
 } from './errors';
