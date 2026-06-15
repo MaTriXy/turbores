@@ -35,6 +35,7 @@ export type WorkerMessage =
         type: MessageType.Decode;
         id: number;
         packet: Uint8Array;
+        bitDepth: number;
         frameBuffer: ArrayBuffer | null;
     };
 

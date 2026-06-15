@@ -8,5 +8,5 @@
     "rootDir": ".",
     "noEmit": false,
   },
-  "include": ["./**/*.ts"],
+  "include": ["./**/*.ts", "../env.d.ts"],
 }

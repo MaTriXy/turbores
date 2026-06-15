@@ -37,8 +37,23 @@ export type DecodeOptions = {
     transfer?: boolean;
 };
 
+const PRORES_FOURCCS = [
+    'ap4x', // ProRes 4444 XQ
+    'ap4h', // ProRes 4444
+    'apch', // ProRes 422 High Quality
+    'apcn', // ProRes 422 Standard Definition
+    'apcs', // ProRes 422 LT
+    'apco', // ProRes 422 Proxy
+];
+
 /** Options for creating a new `Decoder`. */
 export type DecoderOptions = {
+    /**
+     * The FourCC indicating the ProRes variant. This is typically found in the container file containing the ProRes
+     * media. When this is not available, `'apch'` is a safe option for 10-bit output. `'ap4x'` and `'ap4h'` provide
+     * 12-bit output.
+     */
+    proresFourCc: 'ap4x' | 'ap4h' | 'apch' | 'apcn' | 'apcs' | 'apco';
     /**
      * Whether to use shared-memory multithreading to speed up packet decoding. `true` is the preferred option and
      * provides the highest decode throughput and lowest latency while minimizing memory copies. Using it in browsers
@@ -69,7 +84,7 @@ export abstract class Decoder implements Disposable, AsyncDisposable {
     /** @internal */
     _queue: Promise<unknown> = Promise.resolve();
     /** @internal */
-    readonly _concurrentDecode: boolean;
+    _concurrentDecode: boolean;
     /** @internal */
     _decodeQueueSize = 0;
     /** @internal */
@@ -79,12 +94,20 @@ export abstract class Decoder implements Disposable, AsyncDisposable {
         this._dequeuedResolve = resolve;
     });
 
-    protected constructor(concurrentDecode = false) {
+    /** Whether this decodes makes use of shared-memory multithreading. Specified in the decoder options. */
+    abstract readonly useSharedMemory: boolean;
+    /**
+     * The number of threads that are used for packet decoding, as specified in the decoder options. A value of `0`
+     * means the decoding happens synchronously.
+     */
+    abstract readonly concurrency: number;
+
+    protected constructor(concurrentDecode: boolean) {
         this._concurrentDecode = concurrentDecode;
     }
 
     /**
-     * The number of decoding tasks that have been queued but have not yet been started. You can monitor this value
+     * The number of decoding tasks that have been queued but have not yet finished. You can monitor this value
      * to apply backpressure if the decoder can't keep up with your supply of packets.
      */
     get decodeQueueSize() {
@@ -92,7 +115,7 @@ export abstract class Decoder implements Disposable, AsyncDisposable {
     }
 
     /**
-     * Resolves whenever a packet queued for decoding starts being decoded. Use it in conjunction with
+     * Resolves whenever a packet queued for decoding finishes decoding. Use it in conjunction with
      * `decodeQueueSize` to apply backpressure.
      */
     get dequeued() {
@@ -113,6 +136,9 @@ export abstract class Decoder implements Disposable, AsyncDisposable {
     static async create(options: DecoderOptions) {
         if (typeof options !== 'object' || !options) {
             throw new TypeError('options must be an object.');
+        }
+        if (!PRORES_FOURCCS.includes(options.proresFourCc)) {
+            throw new TypeError(`options.proresFourCc must be one of ${PRORES_FOURCCS.join(', ')}.`);
         }
         if (typeof options.useSharedMemory !== 'boolean') {
             throw new TypeError('options.useSharedMemory must be a boolean.');
@@ -135,6 +161,9 @@ export abstract class Decoder implements Disposable, AsyncDisposable {
             );
         }
 
+        const bitDepth = options.proresFourCc === 'ap4h' || options.proresFourCc === 'ap4x'
+            ? 12
+            : 10;
         const concurrency = options.concurrency ?? await getConcurrency();
 
         // Concurrency 0 always uses the shared memory runtime, since that's the only one with a WASM instance on the
@@ -151,7 +180,7 @@ export abstract class Decoder implements Disposable, AsyncDisposable {
                 return new OutOfMemoryError();
             }
 
-            return new SharedMemoryDecoder(runtime, decoderPtr, concurrency) as Decoder;
+            return new SharedMemoryDecoder(runtime, decoderPtr, concurrency, bitDepth) as Decoder;
         } else {
             // No shared memory: use the message-passing runtime
             const runtime = getMessagePassingRuntime();
@@ -163,12 +192,12 @@ export abstract class Decoder implements Disposable, AsyncDisposable {
                 return failure;
             }
 
-            return new MessagePassingDecoder(runtime) as Decoder;
+            return new MessagePassingDecoder(runtime, concurrency, bitDepth) as Decoder;
         }
     }
 
     /** Whether the environment supports proper shared-memory multithreading. */
-    static sharedMemoryIsAvailable() {
+    static canUseSharedMemory() {
         return canUseSharedMemory;
     }
 
@@ -204,16 +233,19 @@ export abstract class Decoder implements Disposable, AsyncDisposable {
         frame._locked = true;
 
         this._decodeQueueSize++;
-        const start = () => {
-            this._markDequeued();
-            return this._runDecode(packetData, frame, options);
-        };
 
-        const work = this._concurrentDecode ? start() : null;
+        const work = this._concurrentDecode ? this._runDecode(packetData, frame, options) : null;
         const promise = this._queue
-            .then(() => work ?? start())
+            .then(() => work ?? this._runDecode(packetData, frame, options))
             .finally(() => {
                 frame._locked = false;
+
+                this._decodeQueueSize--;
+
+                this._dequeuedResolve();
+                this._dequeued = new Promise<void>((resolve) => {
+                    this._dequeuedResolve = resolve;
+                });
             });
         this._queue = promise.catch(() => {});
 
@@ -269,23 +301,24 @@ const sharedMemoryDecoderRegistry = new FinalizationRegistry<{ runtime: SharedMe
 // Used when proper shared memory is available
 class SharedMemoryDecoder extends Decoder {
     /** @internal */
+    _bitDepth: number;
+    /** @internal */
     _runtime: SharedMemoryRuntime | null;
     /** @internal */
     _ptr: number;
     /** @internal */
     _waitWordAddress: number;
-    /**
-     * 0 means decodePacket runs synchronously in the main thread
-     * @internal
-     */
-    _concurrency: number;
 
-    constructor(runtime: SharedMemoryRuntime, ptr: number, concurrency: number) {
-        super();
+    override readonly useSharedMemory = true;
+    override readonly concurrency: number;
+
+    constructor(runtime: SharedMemoryRuntime, ptr: number, concurrency: number, bitDepth: number) {
+        super(false);
         this._runtime = runtime;
         this._ptr = ptr;
         this._waitWordAddress = runtime.exports.getWaitWordAddress(ptr);
-        this._concurrency = concurrency;
+        this._bitDepth = bitDepth;
+        this.concurrency = concurrency;
 
         sharedMemoryDecoderRegistry.register(this, { runtime, ptr }, this);
     }
@@ -321,12 +354,12 @@ class SharedMemoryDecoder extends Decoder {
         }
         new Uint8Array(memory.buffer).set(packetData, packetPtr);
 
-        let resultCode = exports.decodePacket(this._ptr, framePtr);
+        let resultCode = exports.decodePacket(this._ptr, framePtr, this._bitDepth);
         if (resultCode < 0) {
             return this._createError(resultCode);
         }
 
-        if (this._concurrency > 0) {
+        if (this.concurrency > 0) {
             // Wait for all workers to finish
             await Atomics.waitAsync(new Int32Array(memory.buffer), this._waitWordAddress / 4, 0).value;
 
@@ -368,10 +401,17 @@ const messagePassingDecoderRegistry = new FinalizationRegistry<MessagePassingRun
 class MessagePassingDecoder extends Decoder {
     /** @internal */
     _runtime: MessagePassingRuntime | null;
+    /** @internal */
+    _bitDepth: number;
 
-    constructor(runtime: MessagePassingRuntime) {
+    override readonly useSharedMemory = false;
+    override readonly concurrency: number;
+
+    constructor(runtime: MessagePassingRuntime, concurrency: number, bitDepth: number) {
         super(true);
         this._runtime = runtime;
+        this.concurrency = concurrency;
+        this._bitDepth = bitDepth;
 
         messagePassingDecoderRegistry.register(this, runtime, this);
     }
@@ -414,7 +454,13 @@ class MessagePassingDecoder extends Decoder {
             | InvalidDataError | NotSupportedError | InvalidStateError
         >((resolve) => {
             worker.postMessage(
-                { type: MessageType.Decode, id, packet, frameBuffer } satisfies WorkerMessage,
+                {
+                    type: MessageType.Decode,
+                    id,
+                    packet,
+                    bitDepth: this._bitDepth,
+                    frameBuffer,
+                } satisfies WorkerMessage,
                 frameBuffer ? [packet.buffer, frameBuffer] : [packet.buffer],
             );
 

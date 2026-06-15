@@ -40,7 +40,6 @@ pub const Decoder = struct {
     slice_offsets: []usize,
     luma_scaling_matrix: [64]f32,
     chroma_scaling_matrix: [64]f32,
-    bit_depth: u32,
     concurrency: u32,
     tasks: []DecodeTask,
     running_task_count: std.atomic.Value(u32),
@@ -53,8 +52,8 @@ pub const Frame = struct {
     frame_data: []align(16) u16,
     coded_width: u32,
     coded_height: u32,
-    display_width: u32,
-    display_height: u32,
+    visible_width: u32,
+    visible_height: u32,
     log2_chroma_blocks_per_mb: u5,
     alpha_bit_depth: u32,
     bit_depth: u32,
@@ -93,7 +92,6 @@ export fn createDecoder(concurrency: u32) ?*Decoder {
         .slice_offsets = &.{},
         .luma_scaling_matrix = undefined,
         .chroma_scaling_matrix = undefined,
-        .bit_depth = 10, // Hardcoded for now, must be passed in from the outside
         .concurrency = concurrency,
         .tasks = &.{},
         .running_task_count = .init(0),
@@ -112,8 +110,8 @@ export fn createFrame() ?*Frame {
         .frame_data = &.{},
         .coded_width = undefined,
         .coded_height = undefined,
-        .display_width = undefined,
-        .display_height = undefined,
+        .visible_width = undefined,
+        .visible_height = undefined,
         .log2_chroma_blocks_per_mb = undefined,
         .alpha_bit_depth = undefined,
         .bit_depth = undefined,
@@ -130,12 +128,12 @@ export fn closeFrame(frame: *Frame) void {
     gpa.destroy(frame);
 }
 
-export fn getDisplayWidth(frame: *Frame) u32 {
-    return frame.display_width;
+export fn getVisibleWidth(frame: *Frame) u32 {
+    return frame.visible_width;
 }
 
-export fn getDisplayHeight(frame: *Frame) u32 {
-    return frame.display_height;
+export fn getVisibleHeight(frame: *Frame) u32 {
+    return frame.visible_height;
 }
 
 export fn getCodedWidth(frame: *Frame) u32 {
@@ -204,14 +202,16 @@ export fn getWaitWordAddress(decoder: *Decoder) *u32 {
     return &decoder.wait_word;
 }
 
-export fn decodePacket(decoder: *Decoder, frame: *Frame) i32 {
-    decodePacketInternal(decoder, frame) catch |err| return misc.toErrorCode(err);
+export fn decodePacket(decoder: *Decoder, frame: *Frame, bit_depth: u32) i32 {
+    decodePacketInternal(decoder, frame, bit_depth) catch |err| return misc.toErrorCode(err);
     return 0;
 }
 
 threadlocal var error_print_buffer: [1024]u8 = undefined;
 
-inline fn decodePacketInternal(decoder: *Decoder, frame: *Frame) misc.ConvertibleError!void {
+inline fn decodePacketInternal(decoder: *Decoder, frame: *Frame, bit_depth: u32) misc.ConvertibleError!void {
+    std.debug.assert(bit_depth == 10 or bit_depth == 12);
+
     decoder.error_message = null;
     decoder.worker_error.store(null, .seq_cst);
 
@@ -317,10 +317,10 @@ inline fn decodePacketInternal(decoder: *Decoder, frame: *Frame) misc.Convertibl
     frame.log2_chroma_blocks_per_mb = @intCast(chrominance_flag + 1); // 0 => 422, 1 => 444
 
     frame.alpha_bit_depth = alpha_info << 3;
-    frame.bit_depth = decoder.bit_depth;
+    frame.bit_depth = bit_depth;
 
-    frame.display_width = frame_width;
-    frame.display_height = frame_height;
+    frame.visible_width = frame_width;
+    frame.visible_height = frame_height;
     frame.coded_width = (frame_width + 15) & ~@as(u32, 15);
     frame.coded_height = (frame_height + 15) & ~@as(u32, 15);
 
@@ -714,7 +714,7 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
         if (has_alpha) {
             switch (frame.alpha_bit_depth) {
                 inline 8, 16 => |source_bit_depth| {
-                    switch (decoder.bit_depth) {
+                    switch (frame.bit_depth) {
                         inline 10, 12 => |target_bit_depth| {
                             // Alpha is not decoded in an interleaved fashion, because it was slower than the
                             // naive approach
@@ -820,7 +820,7 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
         if (has_alpha) {
             switch (frame.alpha_bit_depth) {
                 inline 8, 16 => |source_bit_depth| {
-                    switch (decoder.bit_depth) {
+                    switch (frame.bit_depth) {
                         inline 10, 12 => |target_bit_depth| {
                             parseAndStoreAlpha(
                                 header.alpha_data,
@@ -1347,7 +1347,7 @@ fn transformAndStoreSliceData(
 ) void {
     std.debug.assert(log2_blocks_per_macroblock == 1 or log2_blocks_per_macroblock == 2);
 
-    const max_value = (@as(u16, 1) << @as(u4, @intCast(task.decoder.bit_depth))) - 1;
+    const max_value = (@as(u16, 1) << @as(u4, @intCast(task.frame.bit_depth))) - 1;
 
     if (log2_blocks_per_macroblock == 2) {
         const coded_width = task.frame.coded_width;

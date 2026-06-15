@@ -13,9 +13,9 @@ import {
 
 describe('Decoding', () => {
     test('Full HD 422 frame', async () => {
-        expect(Decoder.sharedMemoryIsAvailable()).toBe(true);
+        expect(Decoder.canUseSharedMemory()).toBe(true);
 
-        const decoder = await Decoder.create({ useSharedMemory: true, concurrency: 0 });
+        const decoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: 0 });
         if (decoder instanceof Error) {
             throw decoder;
         }
@@ -28,8 +28,8 @@ describe('Decoding', () => {
 
         expect(result).toBe(frame);
         expect(frame.isFilled).toBe(true);
-        expect(frame.displayWidth).toBe(1920);
-        expect(frame.displayHeight).toBe(1080);
+        expect(frame.visibleWidth).toBe(1920);
+        expect(frame.visibleHeight).toBe(1080);
         expect(frame.codedWidth).toBe(1920);
         expect(frame.codedHeight).toBe(1088);
         expect(frame.pixelFormat).toBe('I422P10');
@@ -52,7 +52,7 @@ describe('Decoding', () => {
     });
 
     test('1904-wide frame', async () => {
-        const decoder = await Decoder.create({ useSharedMemory: true, concurrency: 0 });
+        const decoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: 0 });
         if (decoder instanceof Error) {
             throw decoder;
         }
@@ -61,8 +61,8 @@ describe('Decoding', () => {
         await decoder.decode(packet, frame);
 
         expect(frame.isFilled).toBe(true);
-        expect(frame.displayWidth).toBe(1904);
-        expect(frame.displayHeight).toBe(1080);
+        expect(frame.visibleWidth).toBe(1904);
+        expect(frame.visibleHeight).toBe(1080);
         expect(frame.codedWidth).toBe(1904);
         expect(frame.codedHeight).toBe(1088);
         expect(frame.pixelFormat).toBe('I422P10');
@@ -76,7 +76,7 @@ describe('Decoding', () => {
     });
 
     test('444 frame', async () => {
-        const decoder = await Decoder.create({ useSharedMemory: true, concurrency: 0 });
+        const decoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: 0 });
         if (decoder instanceof Error) {
             throw decoder;
         }
@@ -85,8 +85,8 @@ describe('Decoding', () => {
         await decoder.decode(packet, frame);
 
         expect(frame.isFilled).toBe(true);
-        expect(frame.displayWidth).toBe(1904);
-        expect(frame.displayHeight).toBe(1080);
+        expect(frame.visibleWidth).toBe(1904);
+        expect(frame.visibleHeight).toBe(1080);
         expect(frame.pixelFormat).toBe('I444P10');
         expect(frame.frameData!.byteLength).toBe(1904 * 1088 * 3 * 2);
         const reference = new Uint8Array(gunzipSync(readFileSync(
@@ -98,7 +98,7 @@ describe('Decoding', () => {
     });
 
     test('Transparent frame', async () => {
-        const decoder = await Decoder.create({ useSharedMemory: true, concurrency: 0 });
+        const decoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: 0 });
         if (decoder instanceof Error) {
             throw decoder;
         }
@@ -107,8 +107,8 @@ describe('Decoding', () => {
         await decoder.decode(packet, frame);
 
         expect(frame.isFilled).toBe(true);
-        expect(frame.displayWidth).toBe(1904);
-        expect(frame.displayHeight).toBe(1080);
+        expect(frame.visibleWidth).toBe(1904);
+        expect(frame.visibleHeight).toBe(1080);
         expect(frame.pixelFormat).toBe('I444AP10');
         expect(frame.colorPrimaries).toBe(2);
         expect(frame.colorTransfer).toBe(2);
@@ -116,6 +116,28 @@ describe('Decoding', () => {
         expect(frame.frameData!.byteLength).toBe(1904 * 1088 * 4 * 2);
         const reference = new Uint8Array(gunzipSync(readFileSync(
             new URL('./public/transparent-2.framedata.gz', import.meta.url),
+        )));
+        expect(Buffer.compare(frame.frameData!, reference)).toBe(0);
+
+        await decoder.close();
+    });
+
+    test('12-bit transparent frame', async () => {
+        const decoder = await Decoder.create({ proresFourCc: 'ap4h', useSharedMemory: true, concurrency: 0 });
+        if (decoder instanceof Error) {
+            throw decoder;
+        }
+        using frame = new Frame();
+        const packet = new Uint8Array(readFileSync(new URL('./public/4444-12bit.prores', import.meta.url)));
+        await decoder.decode(packet, frame);
+
+        expect(frame.isFilled).toBe(true);
+        expect(frame.visibleWidth).toBe(1920);
+        expect(frame.visibleHeight).toBe(1080);
+        expect(frame.pixelFormat).toBe('I444AP12');
+        expect(frame.frameData!.byteLength).toBe(1920 * 1088 * 4 * 2);
+        const reference = new Uint8Array(gunzipSync(readFileSync(
+            new URL('./public/4444-12bit.framedata.gz', import.meta.url),
         )));
         expect(Buffer.compare(frame.frameData!, reference)).toBe(0);
 
@@ -208,11 +230,11 @@ describe('Invalid packets', () => {
 describe('Decoding modes', () => {
     test('Shared memory multithreading speedup', async () => {
         const packet = new Uint8Array(readFileSync(new URL('./public/buck-bunny.prores', import.meta.url)));
-        const syncDecoder = await Decoder.create({ useSharedMemory: true, concurrency: 0 });
+        const syncDecoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: 0 });
         if (syncDecoder instanceof Error) {
             throw syncDecoder;
         }
-        const threadedDecoder = await Decoder.create({ useSharedMemory: true, concurrency: 4 });
+        const threadedDecoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: 4 });
         if (threadedDecoder instanceof Error) {
             throw threadedDecoder;
         }
@@ -242,7 +264,7 @@ describe('Decoding modes', () => {
 
     test('Message passing multithreading speedup', async () => {
         const packet = new Uint8Array(readFileSync(new URL('./public/buck-bunny.prores', import.meta.url)));
-        const decoder = await Decoder.create({ useSharedMemory: false, concurrency: 4 });
+        const decoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: false, concurrency: 4 });
         if (decoder instanceof Error) {
             throw decoder;
         }
@@ -268,7 +290,7 @@ describe('Decoding modes', () => {
 
 describe('API misuse', () => {
     test('Frame locked during decode', async () => {
-        const decoder = await Decoder.create({ useSharedMemory: true, concurrency: 0 });
+        const decoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: 0 });
         if (decoder instanceof Error) {
             throw decoder;
         }
@@ -289,7 +311,7 @@ describe('API misuse', () => {
     });
 
     test('Closed decoder', async () => {
-        const decoder = await Decoder.create({ useSharedMemory: true, concurrency: 0 });
+        const decoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: 0 });
         if (decoder instanceof Error) {
             throw decoder;
         }
@@ -301,7 +323,7 @@ describe('API misuse', () => {
     });
 
     test('Serialized results with shared memory', async () => {
-        const decoder = await Decoder.create({ useSharedMemory: true, concurrency: 4 });
+        const decoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: 4 });
         if (decoder instanceof Error) {
             throw decoder;
         }
@@ -322,13 +344,13 @@ describe('API misuse', () => {
         }));
 
         expect(order).toEqual([0, 1, 2, 3]);
-        expect(results.map(frame => frame.displayWidth)).toEqual([1920, 1904, 1920, 1904]);
+        expect(results.map(frame => frame.visibleWidth)).toEqual([1920, 1904, 1920, 1904]);
 
         await decoder.close();
     });
 
     test('Serialized results with message passing', async () => {
-        const decoder = await Decoder.create({ useSharedMemory: false, concurrency: 4 });
+        const decoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: false, concurrency: 4 });
         if (decoder instanceof Error) {
             throw decoder;
         }
@@ -349,13 +371,13 @@ describe('API misuse', () => {
         }));
 
         expect(order).toEqual([0, 1, 2, 3]);
-        expect(results.map(frame => frame.displayWidth)).toEqual([1920, 1904, 1920, 1904]);
+        expect(results.map(frame => frame.visibleWidth)).toEqual([1920, 1904, 1920, 1904]);
 
         await decoder.close();
     });
 
     test('Packet transfer with shared memory', async () => {
-        const decoder = await Decoder.create({ useSharedMemory: true, concurrency: 0 });
+        const decoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: 0 });
         if (decoder instanceof Error) {
             throw decoder;
         }
@@ -370,7 +392,7 @@ describe('API misuse', () => {
     });
 
     test('Packet transfer with message passing', async () => {
-        const decoder = await Decoder.create({ useSharedMemory: false, concurrency: 1 });
+        const decoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: false, concurrency: 1 });
         if (decoder instanceof Error) {
             throw decoder;
         }
@@ -385,7 +407,7 @@ describe('API misuse', () => {
     });
 
     test('Frame reuse after clear', async () => {
-        const decoder = await Decoder.create({ useSharedMemory: true, concurrency: 0 });
+        const decoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: 0 });
         if (decoder instanceof Error) {
             throw decoder;
         }
@@ -398,7 +420,7 @@ describe('API misuse', () => {
 
         const secondPacket = new Uint8Array(readFileSync(new URL('./public/buck-bunny-1904.prores', import.meta.url)));
         await decoder.decode(secondPacket, frame);
-        expect(frame.displayWidth).toBe(1904);
+        expect(frame.visibleWidth).toBe(1904);
 
         await decoder.close();
     });
@@ -411,17 +433,20 @@ describe('Input validation', () => {
         // @ts-expect-error Intentionally invalid
         await expect(Decoder.create(null)).rejects.toThrow(TypeError);
         // @ts-expect-error Intentionally invalid
-        await expect(Decoder.create({})).rejects.toThrow(TypeError);
+        await expect(Decoder.create({ proresFourCc: 'apch' })).rejects.toThrow(TypeError);
         // @ts-expect-error Intentionally invalid
-        await expect(Decoder.create({ useSharedMemory: 1 })).rejects.toThrow(TypeError);
-        await expect(Decoder.create({ useSharedMemory: true, concurrency: -1 })).rejects.toThrow(TypeError);
-        await expect(Decoder.create({ useSharedMemory: true, concurrency: 1.5 })).rejects.toThrow(TypeError);
+        await expect(Decoder.create({ proresFourCc: 'apch', useSharedMemory: 1 })).rejects.toThrow(TypeError);
+        await expect(Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: -1 }))
+            .rejects.toThrow(TypeError);
+        await expect(Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: 1.5 }))
+            .rejects.toThrow(TypeError);
         // @ts-expect-error Intentionally invalid
-        await expect(Decoder.create({ useSharedMemory: true, concurrency: '4' })).rejects.toThrow(TypeError);
+        await expect(Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: '4' }))
+            .rejects.toThrow(TypeError);
     });
 
     test('Decode arguments', async () => {
-        const decoder = await Decoder.create({ useSharedMemory: true, concurrency: 0 });
+        const decoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: 0 });
         if (decoder instanceof Error) {
             throw decoder;
         }
@@ -445,7 +470,7 @@ const decodeMutated = async (mutate: (packet: Uint8Array, view: DataView) => voi
     const packet = new Uint8Array(readFileSync(new URL('./public/buck-bunny.prores', import.meta.url)));
     mutate(packet, new DataView(packet.buffer));
 
-    const decoder = await Decoder.create({ useSharedMemory: true, concurrency: 0 });
+    const decoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: 0 });
     if (decoder instanceof Error) {
         throw decoder;
     }

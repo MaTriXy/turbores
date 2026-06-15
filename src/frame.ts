@@ -47,15 +47,15 @@ export class Frame implements Disposable {
     /** The coded height of the frame data in pixels. Always a multiple of 16. */
     codedHeight: number | null = null;
     /**
-     * The display width of the frame in pixels. May be smaller than `codedWidth`. The displayed rectangle always
-     * starts in the top-left corner of the coded rectangle.
+     * The visible, displayed width of the frame in pixels. May be smaller than `codedWidth`. The visible rectangle
+     * always starts in the top-left corner of the coded rectangle.
      */
-    displayWidth: number | null = null;
+    visibleWidth: number | null = null;
     /**
-     * The display height of the frame in pixels. May be smaller than `codedHeight`. The displayed rectangle always
-     * starts in the top-left corner of the coded rectangle.
+     * The visible, displayed height of the frame in pixels. May be smaller than `codedHeight`. The displayed rectangle
+     * always starts in the top-left corner of the coded rectangle.
      */
-    displayHeight: number | null = null;
+    visibleHeight: number | null = null;
     /** The pixel format of the decoded frame. */
     pixelFormat: PixelFormat | null = null;
     /**
@@ -158,8 +158,8 @@ export class Frame implements Disposable {
         return this.frameData !== null
             && this.codedWidth !== null
             && this.codedHeight !== null
-            && this.displayWidth !== null
-            && this.displayHeight !== null
+            && this.visibleWidth !== null
+            && this.visibleHeight !== null
             && this.pixelFormat !== null
             && this.colorPrimaries !== null
             && this.colorTransfer !== null
@@ -235,8 +235,8 @@ export class Frame implements Disposable {
         this.frameData = null;
         this.codedWidth = null;
         this.codedHeight = null;
-        this.displayWidth = null;
-        this.displayHeight = null;
+        this.visibleWidth = null;
+        this.visibleHeight = null;
         this.pixelFormat = null;
         this.colorPrimaries = null;
         this.colorTransfer = null;
@@ -249,8 +249,8 @@ export class Frame implements Disposable {
         this.frameData = contents.frameData;
         this.codedWidth = contents.codedWidth;
         this.codedHeight = contents.codedHeight;
-        this.displayWidth = contents.displayWidth;
-        this.displayHeight = contents.displayHeight;
+        this.visibleWidth = contents.visibleWidth;
+        this.visibleHeight = contents.visibleHeight;
         this.pixelFormat = contents.pixelFormat;
         this.colorPrimaries = contents.colorPrimaries;
         this.colorTransfer = contents.colorTransfer;
@@ -259,19 +259,17 @@ export class Frame implements Disposable {
     }
 }
 
-type FrameDataFields =
-    | 'frameData' | 'codedWidth' | 'codedHeight' | 'displayWidth' | 'displayHeight'
-    | 'pixelFormat' | 'colorPrimaries' | 'colorTransfer' | 'colorMatrix' | 'colorRangeFull';
-
 /** A `Frame` that is known to be filled with decoded data, with `null` removed from all of its data fields. */
-export type FilledFrame = Frame & { [K in FrameDataFields]: NonNullable<Frame[K]> };
+export type FilledFrame = {
+    [K in keyof Frame]: NonNullable<Frame[K]>
+};
 
 export type FrameContents = {
     frameData: Uint8Array;
     codedWidth: number;
     codedHeight: number;
-    displayWidth: number;
-    displayHeight: number;
+    visibleWidth: number;
+    visibleHeight: number;
     pixelFormat: PixelFormat;
     colorPrimaries: number;
     colorTransfer: number;
@@ -293,8 +291,8 @@ export const readFrameContents = (exports: WasmExports, memory: WebAssembly.Memo
         frameData,
         codedWidth: exports.getCodedWidth(ptr),
         codedHeight: exports.getCodedHeight(ptr),
-        displayWidth: exports.getDisplayWidth(ptr),
-        displayHeight: exports.getDisplayHeight(ptr),
+        visibleWidth: exports.getVisibleWidth(ptr),
+        visibleHeight: exports.getVisibleHeight(ptr),
         pixelFormat,
         colorPrimaries: exports.getColorPrimaries(ptr),
         colorTransfer: exports.getColorTransfer(ptr),

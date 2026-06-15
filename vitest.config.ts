@@ -1,5 +1,5 @@
 import { defineConfig } from 'vitest/config';
-import { inlinedBinary, inlinedWorker } from './vite.config';
+import { inlinedBinary, inlinedWorker } from './vite.config.js';
 
 export default defineConfig({
     plugins: [inlinedWorker(), inlinedBinary()],

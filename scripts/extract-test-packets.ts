@@ -1,25 +1,24 @@
+// Usage: npx tsx scripts/extract-test-packets.ts <input-file> <timestamp> <output-name>
+
 import { ALL_FORMATS, EncodedPacketSink, FilePathSource, Input } from 'mediabunny';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 
-const extractPacket = async (filePath: string, timestamp: number, outputName: string) => {
-    const input = new Input({
-        source: new FilePathSource(new URL(`../${filePath}`, import.meta.url).pathname),
-        formats: ALL_FORMATS,
-    });
+const [inputFile, timestamp, outputName] = process.argv.slice(2);
+if (!inputFile || timestamp === undefined || !outputName) {
+    throw new Error('Usage: extract-test-packets.ts <input-file> <timestamp> <output-name>');
+}
 
-    const videoTrack = (await input.getPrimaryVideoTrack())!;
-    const sink = new EncodedPacketSink(videoTrack);
-    const packet = (await sink.getPacket(timestamp))!;
+const input = new Input({
+    source: new FilePathSource(resolve(inputFile)),
+    formats: ALL_FORMATS,
+});
 
-    const outputPath = new URL(`../tests/public/${outputName}.prores`, import.meta.url);
-    await writeFile(outputPath, packet.data);
+const videoTrack = (await input.getPrimaryVideoTrack())!;
+const sink = new EncodedPacketSink(videoTrack);
+const packet = (await sink.getPacket(Number(timestamp)))!;
 
-    console.log(`${outputName}.prores: ${packet.data.byteLength} bytes (t=${packet.timestamp})`);
-};
+const outputPath = new URL(`../tests/public/${outputName}.prores`, import.meta.url);
+await writeFile(outputPath, packet.data);
 
-await mkdir(new URL('../tests/public', import.meta.url), { recursive: true });
-
-await extractPacket('prores-buck-bunny.mov', 5, 'buck-bunny');
-await extractPacket('prores-buck-bunny-1904.mov', 5, 'buck-bunny-1904');
-await extractPacket('prores-buck-bunny-444.mov', 5, 'buck-bunny-444');
-await extractPacket('prores-transparent-2.mov', 0, 'transparent-2');
+console.log(`${outputName}.prores: ${packet.data.byteLength} bytes (t=${packet.timestamp})`);

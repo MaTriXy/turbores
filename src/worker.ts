@@ -80,7 +80,7 @@ const onMessage = async (message: WorkerMessage) => {
         case MessageType.Decode: {
             assert(messagePassingState);
             const { exports, memory, decoder, frame } = messagePassingState;
-            const { id, packet, frameBuffer: buffer } = message;
+            const { id, packet, bitDepth, frameBuffer: buffer } = message;
 
             const packetPtr = exports.allocatePacket(decoder, packet.byteLength);
             if (packetPtr === 0) {
@@ -94,7 +94,7 @@ const onMessage = async (message: WorkerMessage) => {
             }
             new Uint8Array(memory.buffer).set(packet, packetPtr);
 
-            const code = exports.decodePacket(decoder, frame);
+            const code = exports.decodePacket(decoder, frame, bitDepth);
             if (code < 0) {
                 let errorMessage: string | undefined = undefined;
                 const messagePtr = exports.getErrorMessagePtr(decoder);
