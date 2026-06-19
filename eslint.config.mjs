@@ -41,6 +41,7 @@ export default tseslint.config(
             'build',
             'eslint.config.mjs',
             'script2.ts',
+            'script3.ts',
         ],
     },
 );
