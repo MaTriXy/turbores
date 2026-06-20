@@ -482,23 +482,25 @@ inline fn decodePacketInternal(decoder: *Decoder, frame: *Frame) misc.Convertibl
                 const target = remaining_size / (task_count_per_picture - i);
                 var current_size: usize = 0;
 
-                while (slice_start_index < total_slices) {
-                    const slice_size = picture.slice_sizes[slice_start_index] + fixed_cost_per_slice;
-                    const new_size = current_size + slice_size;
+                // Slices are distributed in pairs because the pair path is the fast path
+                while (slice_start_index + 1 < total_slices) {
+                    const slice_size_1 = picture.slice_sizes[slice_start_index] + fixed_cost_per_slice;
+                    const slice_size_2 = picture.slice_sizes[slice_start_index + 1] + fixed_cost_per_slice;
+                    const new_size = current_size + slice_size_1 + slice_size_2;
 
                     if (new_size > target) {
                         // We now overshot the target. Check if we're now closer to the target than before. If yes, take
-                        // one more slice, if no, don't.
+                        // one more slice pair, if no, don't.
                         if (new_size - target <= target - current_size) {
                             current_size = new_size;
-                            slice_start_index += 1;
+                            slice_start_index += 2;
                         }
 
                         break;
                     }
 
                     current_size = new_size;
-                    slice_start_index += 1;
+                    slice_start_index += 2;
                 }
 
                 remaining_size -= current_size;
@@ -1563,7 +1565,7 @@ inline fn parseCode(word: u64, params: u64) !ParsedCode {
     };
 }
 
-fn transformAndStoreSliceData(
+inline fn transformAndStoreSliceData(
     task: *DecodeTask,
     slice_data: []const f32,
     frame_data: []align(2) u8,
@@ -1572,8 +1574,52 @@ fn transformAndStoreSliceData(
     num_blocks: u32,
     source_log2_blocks_per_macroblock: u32,
     target_log2_block_per_macroblock: u32,
-    comptime is_chroma: bool,
+    is_chroma: bool,
     bytes_per_sample: u32,
+    row_stride_shift: u5,
+) void {
+    // Based on the incoming parameters, dispatch to the correct baked function
+    switch (bytes_per_sample) {
+        inline 1, 2 => |bytes_per_sample_captured| {
+            switch (source_log2_blocks_per_macroblock) {
+                inline 1, 2 => |source_log2_blocks_per_macroblock_captured| {
+                    switch (target_log2_block_per_macroblock) {
+                        inline 0, 1, 2 => |target_log2_block_per_macroblock_captured| {
+                            transformAndStoreSliceDataBaked(
+                                task,
+                                slice_data,
+                                frame_data,
+                                scaling_matrix_vec,
+                                slice_pos,
+                                num_blocks,
+                                source_log2_blocks_per_macroblock_captured,
+                                target_log2_block_per_macroblock_captured,
+                                is_chroma,
+                                bytes_per_sample_captured,
+                                row_stride_shift,
+                            );
+                        },
+                        else => unreachable,
+                    }
+                },
+                else => unreachable,
+            }
+        },
+        else => unreachable,
+    }
+}
+
+noinline fn transformAndStoreSliceDataBaked(
+    task: *DecodeTask,
+    slice_data: []const f32,
+    frame_data: []align(2) u8,
+    scaling_matrix_vec: @Vector(64, f32),
+    slice_pos: SlicePos,
+    num_blocks: u32,
+    comptime source_log2_blocks_per_macroblock: u32,
+    comptime target_log2_block_per_macroblock: u32,
+    is_chroma: bool,
+    comptime bytes_per_sample: u32,
     row_stride_shift: u5,
 ) void {
     std.debug.assert(source_log2_blocks_per_macroblock == 1 or source_log2_blocks_per_macroblock == 2);
@@ -1585,296 +1631,246 @@ fn transformAndStoreSliceData(
     // Doubled for interlaced fields so consecutive field rows land two rows apart in the shared buffer
     const frame_coded_width = task.frame.coded_width << row_stride_shift;
 
-    switch (bytes_per_sample) {
-        inline 1, 2 => |bytes_per_sample_captured| {
-            const ElementType = if (bytes_per_sample_captured == 1) u8 else u16;
-            const cast_frame_data = std.mem.bytesAsSlice(ElementType, frame_data);
+    const ElementType = if (bytes_per_sample == 1) u8 else u16;
+    const cast_frame_data = std.mem.bytesAsSlice(ElementType, frame_data);
 
-            if (source_log2_blocks_per_macroblock == 2) {
-                const coded_width = frame_coded_width;
+    if (source_log2_blocks_per_macroblock == 2) {
+        const coded_width = frame_coded_width;
 
-                var j: u32 = 0;
-                while (j < num_blocks) : (j += 4) {
-                    const result_1 = idct_8x8(
-                        slice_data[(j << 6)..][0..64].*,
-                        scaling_matrix_vec,
-                        dc_offset,
-                        max_value,
+        var j: u32 = 0;
+        while (j < num_blocks) : (j += 4) {
+            const result_1 = idct_8x8(
+                slice_data[(j << 6)..][0..64].*,
+                scaling_matrix_vec,
+                dc_offset,
+                max_value,
+                ElementType,
+            );
+            const result_2 = idct_8x8(
+                slice_data[(j << 6) + 64 ..][0..64].*,
+                scaling_matrix_vec,
+                dc_offset,
+                max_value,
+                ElementType,
+            );
+            const result_3 = idct_8x8(
+                slice_data[(j << 6) + 128 ..][0..64].*,
+                scaling_matrix_vec,
+                dc_offset,
+                max_value,
+                ElementType,
+            );
+            const result_4 = idct_8x8(
+                slice_data[(j << 6) + 192 ..][0..64].*,
+                scaling_matrix_vec,
+                dc_offset,
+                max_value,
+                ElementType,
+            );
+
+            switch (target_log2_block_per_macroblock) {
+                0 => {
+                    // 444->420, drop every even column and even row
+                    const chroma_width = frame_coded_width >> 1;
+                    const block_x = (slice_pos.x >> 1) + ((j >> 2) << 3);
+                    const block_y = slice_pos.y >> 1;
+
+                    // Top half
+                    storeBlockOddColumns(
                         ElementType,
+                        cast_frame_data,
+                        chroma_width,
+                        result_1,
+                        result_3,
+                        block_x,
+                        block_y,
+                        true,
                     );
-                    const result_2 = idct_8x8(
-                        slice_data[(j << 6) + 64 ..][0..64].*,
-                        scaling_matrix_vec,
-                        dc_offset,
-                        max_value,
+                    // Bottom half
+                    storeBlockOddColumns(
                         ElementType,
+                        cast_frame_data,
+                        chroma_width,
+                        result_2,
+                        result_4,
+                        block_x,
+                        block_y + 4,
+                        true,
                     );
-                    const result_3 = idct_8x8(
-                        slice_data[(j << 6) + 128 ..][0..64].*,
-                        scaling_matrix_vec,
-                        dc_offset,
-                        max_value,
+                },
+                1 => {
+                    // 444->422, drop every even column
+                    const chroma_width = frame_coded_width >> 1;
+                    const block_x = (slice_pos.x >> 1) + ((j >> 2) << 3);
+                    const block_y = slice_pos.y;
+
+                    // Top
+                    storeBlockOddColumns(
                         ElementType,
+                        cast_frame_data,
+                        chroma_width,
+                        result_1,
+                        result_3,
+                        block_x,
+                        block_y,
+                        false,
                     );
-                    const result_4 = idct_8x8(
-                        slice_data[(j << 6) + 192 ..][0..64].*,
-                        scaling_matrix_vec,
-                        dc_offset,
-                        max_value,
+                    // Bottom
+                    storeBlockOddColumns(
                         ElementType,
+                        cast_frame_data,
+                        chroma_width,
+                        result_2,
+                        result_4,
+                        block_x,
+                        block_y + 8,
+                        false,
                     );
+                },
+                2 => {
+                    // 444->444, keep as-is
+                    const block_x = slice_pos.x + ((j >> 2) << 4);
+                    const block_y = slice_pos.y;
 
-                    if (is_chroma) {
-                        switch (target_log2_block_per_macroblock) {
-                            0 => {
-                                // 444->420, drop every even column and even row
-                                const chroma_width = frame_coded_width >> 1;
-                                const block_x = (slice_pos.x >> 1) + ((j >> 2) << 3);
-                                const block_y = slice_pos.y >> 1;
-
-                                // Top half
-                                storeBlockOddColumns(
-                                    ElementType,
-                                    cast_frame_data,
-                                    chroma_width,
-                                    result_1,
-                                    result_3,
-                                    block_x,
-                                    block_y,
-                                    true,
-                                );
-                                // Bottom half
-                                storeBlockOddColumns(
-                                    ElementType,
-                                    cast_frame_data,
-                                    chroma_width,
-                                    result_2,
-                                    result_4,
-                                    block_x,
-                                    block_y + 4,
-                                    true,
-                                );
-                            },
-                            1 => {
-                                // 444->422, drop every even column
-                                const chroma_width = frame_coded_width >> 1;
-                                const block_x = (slice_pos.x >> 1) + ((j >> 2) << 3);
-                                const block_y = slice_pos.y;
-
-                                // Top
-                                storeBlockOddColumns(
-                                    ElementType,
-                                    cast_frame_data,
-                                    chroma_width,
-                                    result_1,
-                                    result_3,
-                                    block_x,
-                                    block_y,
-                                    false,
-                                );
-                                // Bottom
-                                storeBlockOddColumns(
-                                    ElementType,
-                                    cast_frame_data,
-                                    chroma_width,
-                                    result_2,
-                                    result_4,
-                                    block_x,
-                                    block_y + 8,
-                                    false,
-                                );
-                            },
-                            2 => {
-                                // 444->444, keep as-is
-                                const block_x = slice_pos.x + ((j >> 2) << 4);
-                                const block_y = slice_pos.y;
-
-                                // Order is different here than for luma!!
-                                // Top-left
-                                storeBlock(
-                                    ElementType,
-                                    cast_frame_data,
-                                    coded_width,
-                                    result_1,
-                                    block_x,
-                                    block_y,
-                                );
-                                // Bottom-left
-                                storeBlock(
-                                    ElementType,
-                                    cast_frame_data,
-                                    coded_width,
-                                    result_2,
-                                    block_x,
-                                    block_y + 8,
-                                );
-                                // Top-right
-                                storeBlock(
-                                    ElementType,
-                                    cast_frame_data,
-                                    coded_width,
-                                    result_3,
-                                    block_x + 8,
-                                    block_y,
-                                );
-                                // Bottom-right
-                                storeBlock(
-                                    ElementType,
-                                    cast_frame_data,
-                                    coded_width,
-                                    result_4,
-                                    block_x + 8,
-                                    block_y + 8,
-                                );
-                            },
-
-                            else => unreachable,
-                        }
-                    } else {
-                        // Luma case, always 444
-                        const block_x = slice_pos.x + ((j >> 2) << 4);
-                        const block_y = slice_pos.y;
-
-                        // Top-left
-                        storeBlock(
-                            ElementType,
-                            cast_frame_data,
-                            coded_width,
-                            result_1,
-                            block_x,
-                            block_y,
-                        );
-                        // Top-right
-                        storeBlock(
-                            ElementType,
-                            cast_frame_data,
-                            coded_width,
-                            result_2,
-                            block_x + 8,
-                            block_y,
-                        );
-                        // Bottom-left
-                        storeBlock(
-                            ElementType,
-                            cast_frame_data,
-                            coded_width,
-                            result_3,
-                            block_x,
-                            block_y + 8,
-                        );
-                        // Bottom-right
-                        storeBlock(
-                            ElementType,
-                            cast_frame_data,
-                            coded_width,
-                            result_4,
-                            block_x + 8,
-                            block_y + 8,
-                        );
-                    }
-                }
-            } else {
-                std.debug.assert(is_chroma);
-
-                var j: u32 = 0;
-                while (j < num_blocks) : (j += 2) {
-                    const result_t = idct_8x8(
-                        slice_data[(j << 6)..][0..64].*,
-                        scaling_matrix_vec,
-                        dc_offset,
-                        max_value,
+                    // Order is different here than for luma!!
+                    // Top-left
+                    storeBlock(
                         ElementType,
+                        cast_frame_data,
+                        coded_width,
+                        result_1,
+                        block_x,
+                        block_y,
                     );
-                    const result_b = idct_8x8(
-                        slice_data[(j << 6) + 64 ..][0..64].*,
-                        scaling_matrix_vec,
-                        dc_offset,
-                        max_value,
+                    // Top-right or bottom-left
+                    storeBlock(
                         ElementType,
+                        cast_frame_data,
+                        coded_width,
+                        result_2,
+                        if (is_chroma) block_x else block_x + 8,
+                        if (is_chroma) block_y + 8 else block_y,
                     );
+                    // Bottom-left or top-right
+                    storeBlock(
+                        ElementType,
+                        cast_frame_data,
+                        coded_width,
+                        result_3,
+                        if (is_chroma) block_x + 8 else block_x,
+                        if (is_chroma) block_y else block_y + 8,
+                    );
+                    // Bottom-right
+                    storeBlock(
+                        ElementType,
+                        cast_frame_data,
+                        coded_width,
+                        result_4,
+                        block_x + 8,
+                        block_y + 8,
+                    );
+                },
 
-                    switch (target_log2_block_per_macroblock) {
-                        0 => {
-                            // 422->420, drop every even row
-                            const coded_width = frame_coded_width >> 1;
-                            const block_x = (slice_pos.x >> 1) + ((j >> 1) << 3);
-                            const block_y = slice_pos.y >> 1;
-
-                            // Top half
-                            storeBlockOddRows(
-                                ElementType,
-                                cast_frame_data,
-                                coded_width,
-                                result_t,
-                                block_x,
-                                block_y,
-                            );
-                            // Bottom half
-                            storeBlockOddRows(
-                                ElementType,
-                                cast_frame_data,
-                                coded_width,
-                                result_b,
-                                block_x,
-                                block_y + 4,
-                            );
-                        },
-                        1 => {
-                            // 422->422, keep as-is
-                            const coded_width = frame_coded_width >> 1;
-                            const block_x = (slice_pos.x >> 1) + ((j >> 1) << 3);
-                            const block_y = slice_pos.y;
-
-                            // Top
-                            storeBlock(
-                                ElementType,
-                                cast_frame_data,
-                                coded_width,
-                                result_t,
-                                block_x,
-                                block_y,
-                            );
-                            // Bottom
-                            storeBlock(
-                                ElementType,
-                                cast_frame_data,
-                                coded_width,
-                                result_b,
-                                block_x,
-                                block_y + 8,
-                            );
-                        },
-                        2 => {
-                            // 422->444, upsample by duplicating columns
-                            const coded_width = frame_coded_width;
-                            const block_x = slice_pos.x + ((j >> 1) << 4);
-                            const block_y = slice_pos.y;
-
-                            // Top
-                            storeUpsampledBlock(
-                                ElementType,
-                                cast_frame_data,
-                                coded_width,
-                                result_t,
-                                block_x,
-                                block_y,
-                            );
-                            // Bottom
-                            storeUpsampledBlock(
-                                ElementType,
-                                cast_frame_data,
-                                coded_width,
-                                result_b,
-                                block_x,
-                                block_y + 8,
-                            );
-                        },
-                        else => unreachable,
-                    }
-                }
+                else => unreachable,
             }
-        },
-        else => unreachable,
+        }
+    } else {
+        var j: u32 = 0;
+        while (j < num_blocks) : (j += 2) {
+            const result_t = idct_8x8(
+                slice_data[(j << 6)..][0..64].*,
+                scaling_matrix_vec,
+                dc_offset,
+                max_value,
+                ElementType,
+            );
+            const result_b = idct_8x8(
+                slice_data[(j << 6) + 64 ..][0..64].*,
+                scaling_matrix_vec,
+                dc_offset,
+                max_value,
+                ElementType,
+            );
+
+            switch (target_log2_block_per_macroblock) {
+                0 => {
+                    // 422->420, drop every even row
+                    const coded_width = frame_coded_width >> 1;
+                    const block_x = (slice_pos.x >> 1) + ((j >> 1) << 3);
+                    const block_y = slice_pos.y >> 1;
+
+                    // Top half
+                    storeBlockOddRows(
+                        ElementType,
+                        cast_frame_data,
+                        coded_width,
+                        result_t,
+                        block_x,
+                        block_y,
+                    );
+                    // Bottom half
+                    storeBlockOddRows(
+                        ElementType,
+                        cast_frame_data,
+                        coded_width,
+                        result_b,
+                        block_x,
+                        block_y + 4,
+                    );
+                },
+                1 => {
+                    // 422->422, keep as-is
+                    const coded_width = frame_coded_width >> 1;
+                    const block_x = (slice_pos.x >> 1) + ((j >> 1) << 3);
+                    const block_y = slice_pos.y;
+
+                    // Top
+                    storeBlock(
+                        ElementType,
+                        cast_frame_data,
+                        coded_width,
+                        result_t,
+                        block_x,
+                        block_y,
+                    );
+                    // Bottom
+                    storeBlock(
+                        ElementType,
+                        cast_frame_data,
+                        coded_width,
+                        result_b,
+                        block_x,
+                        block_y + 8,
+                    );
+                },
+                2 => {
+                    // 422->444, upsample by duplicating columns
+                    const coded_width = frame_coded_width;
+                    const block_x = slice_pos.x + ((j >> 1) << 4);
+                    const block_y = slice_pos.y;
+
+                    // Top
+                    storeUpsampledBlock(
+                        ElementType,
+                        cast_frame_data,
+                        coded_width,
+                        result_t,
+                        block_x,
+                        block_y,
+                    );
+                    // Bottom
+                    storeUpsampledBlock(
+                        ElementType,
+                        cast_frame_data,
+                        coded_width,
+                        result_b,
+                        block_x,
+                        block_y + 8,
+                    );
+                },
+                else => unreachable,
+            }
+        }
     }
 }
 
