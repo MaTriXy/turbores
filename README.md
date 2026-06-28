@@ -253,4 +253,4 @@ Use `npm run check` and `npm run lint` to perform typechecking and linting on th
 
 Use `npm test` to run the full test suite using the Zig debug build.
 
-Use `npm run demo:dev` and `npm run demo:build` to run and build the demo.
+Use `npm run demo:dev` and `npm run demo:build` to run and build the demo. Working with the demo assumes that the Zig code has already been built.
