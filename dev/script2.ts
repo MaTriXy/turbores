@@ -1,5 +1,5 @@
 import { ALL_FORMATS, EncodedPacketSink, FilePathSource, Input, UrlSource } from 'mediabunny';
-import { Decoder, Frame } from './src/index';
+import { Decoder, Frame } from '../src/index';
 
 const decoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: true });
 if (decoder instanceof Error) {

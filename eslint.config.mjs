@@ -40,8 +40,7 @@ export default tseslint.config(
             'dist',
             'build',
             'eslint.config.mjs',
-            'script2.ts',
-            'script3.ts',
+            'dev',
         ],
     },
 );
