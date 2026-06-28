@@ -725,7 +725,7 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
         }
     }
 
-    // Grab slice pairs from the picture's shared cursor until it's drained. Pairs are always (even, even+1), so an odd
+    // Grab slice pairs from the picture's shared cursor until it's drained
     while (true) {
         const base = picture.next_slice_index.fetchAdd(2, .seq_cst);
         if (base >= slice_count) {
