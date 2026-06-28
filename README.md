@@ -106,8 +106,8 @@ Since errors are returned plainly, you can check for them using a simple `instan
 ### Multithreading
 
 TurboRes can use multiple threads to run faster. It has two systems for doing this:
-- Shared-memory multithreading: Here, all threads operate on the same memory and can split up the work of decoding a single ProRes packet. This is the fastest option with the least overhead, and provides extremely low latency since multiple threads attack the same packet.
-- Worker pool-based multithreading: Here, multiple workers are created, each of which decodes a packet fully by itself. When multiple packets are decoded in quick succession, the packets are distributed to multiple workers so they can decode frames in parallel. This variant has higher decoding latency and overhead due to message passing.
+- **Shared-memory multithreading:** Here, all threads operate on the same memory and can split up the work of decoding a single ProRes packet. This is the fastest option with the least overhead, and provides extremely low latency since multiple threads attack the same packet.
+- **Worker pool-based multithreading:** Here, multiple workers are created, each of which decodes a packet fully by itself. When multiple packets are decoded in quick succession, the packets are distributed to multiple workers so they can decode frames in parallel. This variant has higher decoding latency and overhead due to message passing.
 
 ---
 
@@ -203,7 +203,7 @@ Decoding jobs will always resolve in the order in which they were queued, meanin
 
 ## Performance
 
-As the name suggests, TurboRes is extremely performant and can decode ProRes at speeds exceeding 1 GB/s. The following benchmarks compare it to native FFmpeg CLI and ffmpeg.wasm:
+As the name suggests, TurboRes is extremely performant and can decode ProRes at speeds exceeding 1 GB/s. The following benchmarks compare it to the native FFmpeg CLI and ffmpeg.wasm:
 
 | | ProRes 422 HQ @ 4K | ProRes 4444 @ 1080p | ProRes 422 HQ @ 1080p | ProRes 422 Proxy @ 1080p |
 | - | - | - | - | - |
@@ -221,7 +221,7 @@ As the name suggests, TurboRes is extremely performant and can decode ProRes at 
 
 ## Under the hood
 
-TurboRes easily beats native FFmpeg in performance, which, while surprising, is simply the result of many optimizations coming together. Here's a quick summary:
+TurboRes easily beats native FFmpeg in performance, which is the result of relentless optimization to make the most out of every CPU cycle. Here's a quick summary of the techniques used:
 
 - The decoding logic is entirely written in Zig, the primary benefit of which is that it emits WebAssembly. WASM via Zig enables a range of features that JavaScript doesn't have, such as manual memory management, SIMD instructions, and easy-to-use shared-memory multithreading.
 - Decoding packets allocates no memory after the first packet and uses barely any additional memory besides storing input and output.
@@ -237,7 +237,7 @@ TurboRes easily beats native FFmpeg in performance, which, while surprising, is 
 
 ## License
 
-TurboRes is licensed under the [Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/), which permits both private and commercial use but requires that any modifications to MPL-covered files be made available to recipients when the software is distributed.
+TurboRes is licensed under the [Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/), which permits both private and commercial use, but requires that any modifications to MPL-covered files be made available to recipients when the software is distributed.
 
 ## Building and development
 
