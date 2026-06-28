@@ -276,6 +276,10 @@ describe('Invalid packets', () => {
 });
 
 describe('Decoding modes', () => {
+    const reference = new Uint8Array(gunzipSync(readFileSync(
+        new URL('./public/buck-bunny.framedata.gz', import.meta.url),
+    )));
+
     test('Shared memory multithreading speedup', async () => {
         const packet = new Uint8Array(readFileSync(new URL('./public/buck-bunny.prores', import.meta.url)));
         const syncDecoder = await Decoder.create({ proresFourCc: 'apch', useSharedMemory: true, concurrency: 0 });
@@ -298,6 +302,8 @@ describe('Decoding modes', () => {
         }
         const syncTime = performance.now() - start;
 
+        expect(Buffer.compare(frame.frameData!, reference)).toBe(0);
+
         start = performance.now();
         for (let i = 0; i < iterations; i++) {
             await threadedDecoder.decode(packet, frame);
@@ -305,6 +311,9 @@ describe('Decoding modes', () => {
         const threadedTime = performance.now() - start;
 
         expect(threadedTime).toBeLessThan(syncTime);
+
+        // The threaded decode must produce the exact same result as a single-threaded one
+        expect(Buffer.compare(frame.frameData!, reference)).toBe(0);
 
         await syncDecoder.close();
         await threadedDecoder.close();
@@ -331,6 +340,11 @@ describe('Decoding modes', () => {
         const parallelTime = performance.now() - start;
 
         expect(parallelTime).toBeLessThan(serialTime);
+
+        // Every worker must have produced the exact same correct result
+        for (const frame of frames) {
+            expect(Buffer.compare(frame.frameData!, reference)).toBe(0);
+        }
 
         await decoder.close();
     });
