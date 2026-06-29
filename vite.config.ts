@@ -137,13 +137,14 @@ export default defineConfig({
     base: './',
     plugins: [inlinedWorker(), inlinedBinary()],
     build: {
+        // Lib mode keeps vite's preload helper out of the bundle
+        lib: {
+            entry: resolve(import.meta.dirname, 'src/index.ts'),
+            formats: ['es'],
+        },
         rollupOptions: {
-            input: resolve(import.meta.dirname, 'src/index.ts'),
-            // index.ts only re-exports, so keep its exports instead of treeshaking them away
-            preserveEntrySignatures: 'strict',
             external: [/^node:/],
             output: {
-                format: 'es',
                 entryFileNames: 'turbores.js',
             },
         },

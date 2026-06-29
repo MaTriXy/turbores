@@ -18,7 +18,7 @@ TurboRes is:
 - **Robust.** TurboRes fully validates all input and gracefully rejects any corrupted or malicious data.
 - **Portable.** TurboRes runs everywhere out of the box: Chromium, Firefox, Safari, Node, Deno, Bun.
 - **Simple.** Very minimal API with easy interop with the WebCodecs API and [Mediabunny](https://mediabunny.dev/).
-- **Tiny.** The gzipped bundle is smaller than 50 kB.
+- **Tiny.** The gzipped bundle is only around 50 kB in size.
 
 > This project was fully enabled by generous donations by sponsors. If you've derived value from this package, please consider [leaving a donation](https://github.com/sponsors/Vanilagy)! 💘
 

@@ -7,6 +7,12 @@
   "main": "./dist/turbores.js",
   "module": "./dist/turbores.js",
   "types": "./dist/turbores.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/turbores.d.ts",
+      "import": "./dist/turbores.js"
+    }
+  },
   "files": [
     "README.md",
     "package.json",
@@ -15,6 +21,10 @@
   ],
   "license": "MPL-2.0",
   "sideEffects": false,
+  "browser": {
+    "node:worker_threads": false,
+    "node:os": false
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Vanilagy/turbores.git"
@@ -54,10 +64,15 @@
   },
   "keywords": [
     "prores",
-    "apple",
+    "apple-prores",
     "decoder",
+    "decode",
+    "decoding",
     "wasm",
     "webassembly",
-    "mediabunny"
+    "mediabunny",
+    "video",
+    "codec",
+    "browser"
   ]
 }
