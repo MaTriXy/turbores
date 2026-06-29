@@ -2,7 +2,9 @@ Use `benchmark-turbores.html`, `benchmark-ffmpeg-wasm.html` and `benchmark-ffmpe
 
 ---
 
-The HTML files have instructions on the page. For the shell script, the usage is:
+The HTML files have instructions on the page. Make sure to run them with the console closed, as an open console slows down WASM execution.
+
+For the shell script, the usage is:
 ```bash
 ./benchmark-ffmpeg-native.sh -t <threads> [-a] <video-file>
 ```
