@@ -184,10 +184,10 @@ const decoder = await Decoder.create({
 
 When the native pixel format is allowed, the decoder will choose that. Otherwise, it will choose an alternative format that minimizes data loss according to an internal heuristic.
 
-The list of available pixel formats is given by this regex:
-```ts
-/^I(420|422|444)A?(P10|P12)?$/
-```
+These pixel formats are supported by TurboRes: \
+`I420`, `I420P10`, `I420P12`, `I420A`, `I420AP10`, `I420AP12` \
+`I422`, `I422P10`, `I422P12`, `I422A`, `I422AP10`, `I422AP12` \
+`I444`, `I444P10`, `I444P12`, `I444A`, `I444AP10`, `I444AP12`
 
 ### Packet queueing
 
