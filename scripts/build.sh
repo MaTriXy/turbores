@@ -10,6 +10,6 @@ tsx scripts/ensure-license-headers.ts
 npx vite build
 
 npx tsc -p src
-cp build/*.d.ts dist/
+npx api-extractor run
 
 npm run check-docblocks

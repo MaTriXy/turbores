@@ -17,7 +17,10 @@ Symbol.dispose ??= Symbol('dispose');
 // @ts-expect-error Readonly
 Symbol.asyncDispose ??= Symbol('asyncDispose');
 
-/** List of supported frame pixel formats. */
+/**
+ * List of supported frame pixel formats.
+ * @public
+ */
 export const PIXEL_FORMATS = [
     // 4:2:0 Y, U, V
     'I420',
@@ -48,12 +51,14 @@ export const PIXEL_FORMATS = [
 /**
  * Describes the pixel format of a decoded frame, including YUV chroma subsampling, bit depth, and alpha presence. The
  * strings are compatible with the WebCodecs API's `VideoPixelFormat`.
+ * @public
  */
 export type PixelFormat = typeof PIXEL_FORMATS[number];
 
 /**
  * Describes how a frame's lines are scanned: `'progressive'` means all lines are stored in a single pass, while the
  * interlaced types split the frame into two fields, with the suffix indicating which field comes first.
+ * @public
  */
 export type ScanType = 'progressive' | 'interlaced-top-field-first' | 'interlaced-bottom-field-first';
 
@@ -93,6 +98,7 @@ const frameRegistry = new FinalizationRegistry<{ runtime: SharedMemoryRuntime; p
  * Make sure to call `.clear()` on the frame when you're fully done using it.
  *
  * A `Frame` that is currently involved in a decoding task is considered _locked_ and using or closing it is an error.
+ * @public
  */
 export class Frame implements Disposable {
     /**
@@ -346,7 +352,10 @@ export class Frame implements Disposable {
     }
 }
 
-/** A `Frame` that is known to be filled with decoded data, with `null` removed from all of its data fields. */
+/**
+ * A `Frame` that is known to be filled with decoded data, with `null` removed from all of its data fields.
+ * @public
+ */
 export type FilledFrame = {
     [K in keyof Frame]: NonNullable<Frame[K]>
 };

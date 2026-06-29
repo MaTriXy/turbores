@@ -144,11 +144,9 @@ export default defineConfig({
             external: [/^node:/],
             output: {
                 format: 'es',
-                entryFileNames: '[name].js',
-                assetFileNames: '[name].[ext]',
+                entryFileNames: 'turbores.js',
             },
         },
-        // minify: false,
     },
     server: {
         hmr: false,

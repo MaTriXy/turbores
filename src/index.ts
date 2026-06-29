@@ -15,6 +15,7 @@ export {
     Frame,
     type FilledFrame,
     type PixelFormat,
+    type ScanType,
     PIXEL_FORMATS,
 } from './frame.js';
 export {

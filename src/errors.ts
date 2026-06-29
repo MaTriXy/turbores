@@ -16,7 +16,10 @@ export enum ErrorCode {
     Overflow = -6,
 }
 
-/** An error caused by an allocation failure. */
+/**
+ * An error caused by an allocation failure.
+ * @public
+ */
 export class OutOfMemoryError extends Error {
     constructor(message = 'The decoder ran out of memory.') {
         super(message);
@@ -24,7 +27,10 @@ export class OutOfMemoryError extends Error {
     }
 }
 
-/** An error caused by the packet ending before the decoder expected it to. */
+/**
+ * An error caused by the packet ending before the decoder expected it to.
+ * @public
+ */
 export class UnexpectedEofError extends Error {
     constructor(message = 'Invalid data: the packet ended before the decoder expected it to.') {
         super(message);
@@ -32,7 +38,10 @@ export class UnexpectedEofError extends Error {
     }
 }
 
-/** An error caused by the packet containing invalid or corrupted data. */
+/**
+ * An error caused by the packet containing invalid or corrupted data.
+ * @public
+ */
 export class InvalidDataError extends Error {
     constructor(message = 'The packet contains invalid data.') {
         super(message);
@@ -40,7 +49,10 @@ export class InvalidDataError extends Error {
     }
 }
 
-/** An error caused by the packet using a feature that the decoder doesn't support. */
+/**
+ * An error caused by the packet using a feature that the decoder doesn't support.
+ * @public
+ */
 export class NotSupportedError extends Error {
     constructor(message = 'The packet uses a feature that is not supported.') {
         super(message);
@@ -48,7 +60,10 @@ export class NotSupportedError extends Error {
     }
 }
 
-/** An error caused by the decoder being in an invalid internal state. */
+/**
+ * An error caused by the decoder being in an invalid internal state.
+ * @public
+ */
 export class InvalidStateError extends Error {
     constructor(message = 'The decoder is in an invalid internal state. This should never happen! Please report.') {
         super(message);
@@ -56,7 +71,10 @@ export class InvalidStateError extends Error {
     }
 }
 
-/** An error caused by an operation being attempted on a closed decoder. */
+/**
+ * An error caused by an operation being attempted on a closed decoder.
+ * @public
+ */
 export class DecoderClosedError extends Error {
     constructor(message = 'The decoder has been closed.') {
         super(message);
@@ -64,7 +82,10 @@ export class DecoderClosedError extends Error {
     }
 }
 
-/** An error caused by attempting to use a frame that is locked by an in-flight decoding operation. */
+/**
+ * An error caused by attempting to use a frame that is locked by an in-flight decoding operation.
+ * @public
+ */
 export class FrameLockedError extends Error {
     constructor(message = 'The frame is locked by an in-flight decoding operation.') {
         super(message);

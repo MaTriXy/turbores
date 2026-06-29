@@ -36,7 +36,10 @@ const PRORES_FOURCCS = [
     'apco', // ProRes 422 Proxy
 ];
 
-/** Options for creating a new `Decoder`. */
+/**
+ * Options for creating a new `Decoder`.
+ * @public
+ */
 export type DecoderOptions = {
     /**
      * The FourCC indicating the ProRes variant. This is typically found in the container file containing the ProRes
@@ -75,7 +78,10 @@ export type DecoderOptions = {
     allowedOutputFormats?: PixelFormat[];
 };
 
-/** Per-packet decode options. */
+/**
+ * Per-packet decode options.
+ * @public
+ */
 export type DecodeOptions = {
     /**
      * Whether to transfer the `ArrayBuffer` that's backing the packet's data. There is no benefit to this when using
@@ -88,6 +94,7 @@ export type DecodeOptions = {
 /**
  * A ProRes decoder instance. Use one `Decoder` instance per ProRes stream you want to decode. Create them using
  * `Decoder.create`.
+ * @public
  */
 export abstract class Decoder implements Disposable, AsyncDisposable {
     /** @internal */
