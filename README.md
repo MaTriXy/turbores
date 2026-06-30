@@ -15,7 +15,7 @@ TurboRes is:
 - **Fast.** With both impressive single- and multi-core performance, TurboRes can decode even high-quality 4K videos at hundreds of frames per second and can be [more than twice as fast as native FFmpeg](#performance).
 - **Feature-rich.** TurboRes supports all ProRes variants: 422/444 High Quality, Standard Definition, LT & Proxy, as well as transparent ProRes 4444, with both 10-bit and 12-bit color depths, progressive or interlaced, at all resolutions up to 16K. Additional features include explicit concurrency control and zero-overhead pixel format conversions.
 - **Correct.** TurboRes provides bit-exact decode results and does not approximate.
-- **Robust.** TurboRes fully validates all input and gracefully rejects any corrupted or malicious data.
+- **Robust.** TurboRes fully validates all input and rejects any invalid, corrupted, or malicious data.
 - **Portable.** TurboRes runs everywhere out of the box: Chromium, Firefox, Safari, Node, Deno, Bun.
 - **Simple.** Very minimal API with easy interop with the WebCodecs API and [Mediabunny](https://mediabunny.dev/).
 - **Tiny.** With zero runtime dependencies, the gzipped bundle is only around 50 kB in size.
