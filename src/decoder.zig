@@ -688,13 +688,6 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
     const slice_data = try gpa.alignedAlloc(f32, .@"16", (max_luma_slice_len + (max_chroma_slice_len << 1)) << 1);
     defer gpa.free(slice_data);
 
-    const slice_1_luma_data = slice_data[0..max_luma_slice_len];
-    const slice_2_luma_data = slice_data[max_luma_slice_len..][0..max_luma_slice_len];
-    const slice_1_u_data = slice_data[(max_luma_slice_len << 1)..][0..max_chroma_slice_len];
-    const slice_2_u_data = slice_data[(max_luma_slice_len << 1) + 1 * max_chroma_slice_len ..][0..max_chroma_slice_len];
-    const slice_1_v_data = slice_data[(max_luma_slice_len << 1) + 2 * max_chroma_slice_len ..][0..max_chroma_slice_len];
-    const slice_2_v_data = slice_data[(max_luma_slice_len << 1) + 3 * max_chroma_slice_len ..][0..max_chroma_slice_len];
-
     const has_alpha_to_parse = frame.alpha_bit_depth > 0;
 
     if (frame.alpha_bit_depth == -1 and &decoder.tasks[decoder.tasks.len - 1] == task) {
@@ -868,6 +861,13 @@ pub fn executeDecodeTask(task: *DecodeTask) !void {
         const num_luma_blocks_2 = header_2.width_mb << 2;
         const num_chroma_blocks_1 = header_1.width_mb << @as(u5, @intCast(decoder.log2_chroma_blocks_per_mb));
         const num_chroma_blocks_2 = header_2.width_mb << @as(u5, @intCast(decoder.log2_chroma_blocks_per_mb));
+
+        const slice_1_luma_data = slice_data[0..max_luma_slice_len];
+        const slice_2_luma_data = slice_data[max_luma_slice_len..][0..max_luma_slice_len];
+        const slice_1_u_data = slice_data[(max_luma_slice_len << 1)..][0..max_chroma_slice_len];
+        const slice_2_u_data = slice_data[(max_luma_slice_len << 1) + 1 * max_chroma_slice_len ..][0..max_chroma_slice_len];
+        const slice_1_v_data = slice_data[(max_luma_slice_len << 1) + 2 * max_chroma_slice_len ..][0..max_chroma_slice_len];
+        const slice_2_v_data = slice_data[(max_luma_slice_len << 1) + 3 * max_chroma_slice_len ..][0..max_chroma_slice_len];
 
         // Luma for slice 1 and 2
         try parseDcAndAcPair(

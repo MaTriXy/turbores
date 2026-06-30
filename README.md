@@ -270,5 +270,5 @@ Use `npm run demo:dev` and `npm run demo:build` to run and build the demo. Worki
 ## References
 
 The following resources helped me realize this project:
-- https://web.archive.org/web/20250802070520/https://wiki.multimedia.cx/index.php/Apple_ProRes
+- https://wiki.multimedia.cx/index.php/Apple_ProRes (https://web.archive.org/web/20250802070520/https://wiki.multimedia.cx/index.php/Apple_ProRes)
 - https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/proresdec.c
